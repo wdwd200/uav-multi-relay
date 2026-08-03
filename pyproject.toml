@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "Multi-relay UAV communication research project."
 readme = "README.md"
 requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+]
 
 [project.optional-dependencies]
 dev = ["pytest"]

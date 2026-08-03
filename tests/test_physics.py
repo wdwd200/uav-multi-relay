@@ -1,0 +1,116 @@
+import math
+
+import numpy as np
+import pytest
+
+from uav_multi_relay.communication import (
+    channel_power_gain,
+    compute_chain_geometries,
+    compute_link_geometry,
+    dipole_gain,
+    equal_tdma_rate,
+    optimal_tdma_rate,
+    ordered_nodes,
+    shannon_capacity_bps,
+    snr_linear,
+)
+from uav_multi_relay.core import MotionLimits, UAVState
+from uav_multi_relay.kinematics import advance_state, make_velocity_feasible
+
+
+@pytest.fixture
+def limits() -> MotionLimits:
+    return MotionLimits(5.0, 2.0, 3.0, 2.0, 1.0)
+
+
+def test_state_is_an_immutable_copy() -> None:
+    position = np.array([1.0, 2.0, 3.0])
+    state = UAVState("uav", position, np.zeros(3))
+    position[0] = 99.0
+    assert state.position_m[0] == 1.0
+    with pytest.raises(ValueError):
+        state.position_m[0] = 4.0
+
+
+@pytest.mark.parametrize("bad_vector", [np.zeros(2), [0.0, 0.0, np.nan]])
+def test_state_rejects_invalid_vectors(bad_vector: object) -> None:
+    with pytest.raises(ValueError):
+        UAVState("uav", bad_vector, np.zeros(3))
+
+
+def test_velocity_is_limited_by_horizontal_speed(limits: MotionLimits) -> None:
+    applied = make_velocity_feasible([100.0, 100.0, 0.0], [0.0, 0.0, 0.0], limits, 10.0)
+    assert np.linalg.norm(applied[:2]) <= limits.max_horizontal_speed_mps
+
+
+def test_velocity_has_separate_climb_and_descent_limits(limits: MotionLimits) -> None:
+    climbing = make_velocity_feasible([0.0, 0.0, 50.0], [0.0, 0.0, 0.0], limits, 10.0)
+    descending = make_velocity_feasible([0.0, 0.0, -50.0], [0.0, 0.0, 0.0], limits, 10.0)
+    assert climbing[2] == limits.max_climb_speed_mps
+    assert descending[2] == -limits.max_descent_speed_mps
+
+
+def test_velocity_change_respects_acceleration(limits: MotionLimits) -> None:
+    current = np.array([1.0, 0.0, 0.5])
+    applied = make_velocity_feasible([20.0, 20.0, 20.0], current, limits, 0.5)
+    assert np.linalg.norm(applied[:2] - current[:2]) <= 1.0
+    assert abs(applied[2] - current[2]) <= 0.5
+
+
+def test_advance_state_uses_applied_velocity_without_mutating_input() -> None:
+    state = UAVState("uav", [1.0, 2.0, 3.0], [9.0, 9.0, 9.0])
+    advanced = advance_state(state, [2.0, -1.0, 0.5], 4.0)
+    assert np.allclose(advanced.position_m, [9.0, -2.0, 5.0])
+    assert np.allclose(advanced.velocity_mps, [2.0, -1.0, 0.5])
+    assert np.allclose(state.position_m, [1.0, 2.0, 3.0])
+
+
+def test_chain_geometry_for_four_relays() -> None:
+    nodes = ordered_nodes(
+        UAVState("H", [0.0, 0.0, 0.0], np.zeros(3)),
+        tuple(UAVState(f"R{i}", [float(i), 0.0, 0.0], np.zeros(3)) for i in range(1, 5)),
+        UAVState("L", [5.0, 0.0, 0.0], np.zeros(3)),
+    )
+    assert len(nodes) == 6
+    assert len(compute_chain_geometries(nodes)) == 5
+
+
+def test_vertical_link_geometry_is_stable() -> None:
+    geometry = compute_link_geometry([0.0, 0.0, 0.0], [0.0, 0.0, 10.0])
+    assert geometry.horizontal_distance_m == 0.0
+    assert geometry.elevation_angle_rad == pytest.approx(math.pi / 2)
+
+
+def test_dipole_gain_has_a_floor() -> None:
+    assert dipole_gain(math.pi / 2, 10.0, 0.2) == pytest.approx(0.2)
+
+
+def test_channel_gain_applies_reference_gain_and_antennas_once() -> None:
+    gain = channel_power_gain(10.0, 2.0, 1.0, 2.0, 3.0, 5.0, 1.0)
+    assert gain == pytest.approx(2.0 * (10.0**-2.0) * 3.0 * 5.0)
+
+
+def test_snr_and_capacity_are_finite_and_nonnegative() -> None:
+    snr = snr_linear(1.0, 0.5, 1e-9, 1e6, 2.0)
+    capacity = shannon_capacity_bps(1e6, snr)
+    assert math.isfinite(snr) and snr >= 0.0
+    assert math.isfinite(capacity) and capacity >= 0.0
+
+
+def test_equal_tdma_rate() -> None:
+    rate, fractions = equal_tdma_rate([10.0, 20.0, 30.0, 40.0, 50.0])
+    assert rate == 2.0
+    assert np.allclose(fractions, 0.2)
+
+
+def test_optimal_tdma_fractions_sum_to_one() -> None:
+    _, fractions = optimal_tdma_rate([10.0, 20.0, 30.0, 40.0, 50.0])
+    assert np.sum(fractions) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("tdma", [equal_tdma_rate, optimal_tdma_rate])
+def test_tdma_handles_zero_capacity(tdma: object) -> None:
+    rate, fractions = tdma([10.0, 0.0, 30.0])
+    assert rate == 0.0
+    assert len(fractions) == 3
+    assert np.all(np.isfinite(fractions))
