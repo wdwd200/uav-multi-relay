@@ -61,10 +61,12 @@ def dipole_gain(
     elevation_angle_rad: float, max_gain_linear: float, min_gain_linear: float
 ) -> float:
     """Return the simplified vertical short-dipole gain in linear units."""
-    if not np.isfinite(elevation_angle_rad):
-        raise ValueError("elevation_angle_rad must be finite")
+    if not np.isfinite(elevation_angle_rad) or not 0.0 <= elevation_angle_rad <= np.pi / 2:
+        raise ValueError("elevation_angle_rad must be within [0, pi / 2]")
     maximum = _positive_finite(max_gain_linear, "max_gain_linear")
     minimum = _positive_finite(min_gain_linear, "min_gain_linear")
+    if minimum > maximum:
+        raise ValueError("min_gain_linear must not exceed max_gain_linear")
     return max(minimum, maximum * float(np.cos(elevation_angle_rad) ** 2))
 
 
@@ -77,7 +79,7 @@ def channel_power_gain(
     rx_gain_linear: float,
     minimum_distance_m: float,
 ) -> float:
-    """Return path loss and directional antenna gain as one linear power gain."""
+    """Return one linear power gain; reference_gain_linear excludes directional antenna gains."""
     if not np.isfinite(distance_m) or distance_m < 0:
         raise ValueError("distance_m must be finite and nonnegative")
     reference_gain = _positive_finite(reference_gain_linear, "reference_gain_linear")

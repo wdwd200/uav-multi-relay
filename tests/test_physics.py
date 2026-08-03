@@ -57,6 +57,14 @@ def test_velocity_change_respects_acceleration(limits: MotionLimits) -> None:
     assert abs(applied[2] - current[2]) <= 0.5
 
 
+@pytest.mark.parametrize("current", [[6.0, 0.0, 0.0], [0.0, 0.0, 2.1], [0.0, 0.0, -3.1]])
+def test_velocity_rejects_infeasible_current_velocity(
+    limits: MotionLimits, current: object
+) -> None:
+    with pytest.raises(ValueError):
+        make_velocity_feasible([0.0, 0.0, 0.0], current, limits, 1.0)
+
+
 def test_advance_state_uses_applied_velocity_without_mutating_input() -> None:
     state = UAVState("uav", [1.0, 2.0, 3.0], [9.0, 9.0, 9.0])
     advanced = advance_state(state, [2.0, -1.0, 0.5], 4.0)
@@ -85,6 +93,17 @@ def test_dipole_gain_has_a_floor() -> None:
     assert dipole_gain(math.pi / 2, 10.0, 0.2) == pytest.approx(0.2)
 
 
+@pytest.mark.parametrize(
+    ("elevation_angle_rad", "max_gain_linear", "min_gain_linear"),
+    [(-0.1, 10.0, 0.2), (math.pi / 2 + 0.1, 10.0, 0.2), (0.0, 0.2, 10.0)],
+)
+def test_dipole_gain_rejects_invalid_parameters(
+    elevation_angle_rad: float, max_gain_linear: float, min_gain_linear: float
+) -> None:
+    with pytest.raises(ValueError):
+        dipole_gain(elevation_angle_rad, max_gain_linear, min_gain_linear)
+
+
 def test_channel_gain_applies_reference_gain_and_antennas_once() -> None:
     gain = channel_power_gain(10.0, 2.0, 1.0, 2.0, 3.0, 5.0, 1.0)
     assert gain == pytest.approx(2.0 * (10.0**-2.0) * 3.0 * 5.0)
@@ -103,9 +122,13 @@ def test_equal_tdma_rate() -> None:
     assert np.allclose(fractions, 0.2)
 
 
-def test_optimal_tdma_fractions_sum_to_one() -> None:
-    _, fractions = optimal_tdma_rate([10.0, 20.0, 30.0, 40.0, 50.0])
+def test_optimal_tdma_equalizes_hop_throughput() -> None:
+    capacities = np.array([10.0, 20.0, 30.0, 40.0, 50.0])
+    rate, fractions = optimal_tdma_rate(capacities)
+    expected_rate = 1.0 / np.sum(1.0 / capacities)
+    assert rate == pytest.approx(expected_rate)
     assert np.sum(fractions) == pytest.approx(1.0)
+    assert fractions * capacities == pytest.approx(np.full_like(capacities, rate))
 
 
 @pytest.mark.parametrize("tdma", [equal_tdma_rate, optimal_tdma_rate])

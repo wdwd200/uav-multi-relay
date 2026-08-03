@@ -28,6 +28,12 @@ def make_velocity_feasible(
     requested = _vector3(requested_velocity_mps, "requested_velocity_mps")
     current = _vector3(current_velocity_mps, "current_velocity_mps")
     delta_t = _positive_finite(delta_t_s, "delta_t_s")
+    if (
+        np.linalg.norm(current[:2]) > limits.max_horizontal_speed_mps
+        or current[2] > limits.max_climb_speed_mps
+        or current[2] < -limits.max_descent_speed_mps
+    ):
+        raise ValueError("current_velocity_mps must satisfy the configured speed limits")
 
     horizontal_delta = requested[:2] - current[:2]
     horizontal_delta = _clip_norm(
