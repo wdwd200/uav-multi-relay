@@ -15,6 +15,8 @@ The logical topology is `H -> R1 -> ... -> RK -> L`.
 - A synchronous, dependency-free multi-relay dynamic environment.
 - Endpoint waypoint followers, relay safety filtering, observations, rewards, and an equal-spacing baseline.
 - Stationary, equal-spacing, weighted-spacing, and greedy one-step coordinate-search baselines.
+- Requested actions and safety-filtered executed normalized actions in environment info.
+- Fixed-capacity multi-agent replay storage with deterministic sampling.
 
 The environment accepts relay actions with shape `(K, 3)` in `[-1, 1]`.
 H/L waypoint paths are generated reproducibly from `reset(seed=...)`, and the
@@ -39,8 +41,10 @@ Multi-agent reinforcement learning remains intentionally unimplemented.
 Model-predictive control is also not implemented.
 
 Shared Gaussian Actor and centralized twin-Q Critic network building blocks are
-implemented for the learning foundation. MASAC updates, replay buffers, target
-critics, entropy tuning, and training loops are not implemented.
+implemented for the learning foundation. The replay buffer stores the
+safety-filtered normalized action that was actually executed, and keeps
+termination separate from time-limit truncation. MASAC updates, target critics,
+entropy tuning, and training loops are not implemented.
 
 ## Installation
 

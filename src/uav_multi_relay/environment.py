@@ -26,6 +26,7 @@ from .safety import (
     SafetyFilterResult,
     filter_relay_velocities,
     normalized_action_to_velocity,
+    velocity_to_normalized_action,
 )
 from .trajectories import WaypointFollower
 
@@ -109,6 +110,7 @@ class MultiRelayEnvironment:
             self._info(
                 self._states,
                 np.zeros((self.config.num_relays, 3)),
+                np.zeros((self.config.num_relays, 3)),
                 self._last_applied_relay_velocities,
                 np.zeros(self.config.num_relays),
                 1.0,
@@ -144,12 +146,14 @@ class MultiRelayEnvironment:
         if not self.config.flight_bounds.contains(high_next.position_m):
             return self._terminate_for_candidate(
                 old_states,
+                normalized_actions,
                 requested,
                 "high endpoint waypoint candidate is outside flight bounds",
             )
         if not self.config.flight_bounds.contains(low_next.position_m):
             return self._terminate_for_candidate(
                 old_states,
+                normalized_actions,
                 requested,
                 "low endpoint waypoint candidate is outside flight bounds",
             )
@@ -167,7 +171,7 @@ class MultiRelayEnvironment:
                 low_next.position_m,
             )
         except NoFeasibleActionError as error:
-            return self._terminate_for_candidate(old_states, requested, str(error))
+            return self._terminate_for_candidate(old_states, normalized_actions, requested, str(error))
 
         relay_next = tuple(
             advance_state(state, velocity, self.config.delta_t_s)
@@ -182,6 +186,7 @@ class MultiRelayEnvironment:
         reward, reward_terms = self._reward(old_states, next_states, filtered, communication)
         info = self._info(
             next_states,
+            normalized_actions,
             filtered.requested_velocities_mps,
             filtered.applied_velocities_mps,
             filtered.intervention_norms,
@@ -356,6 +361,7 @@ class MultiRelayEnvironment:
     def _terminate_for_candidate(
         self,
         old_states: tuple[UAVState, ...],
+        requested_actions: np.ndarray,
         requested: np.ndarray,
         reason: str,
     ) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, object]]:
@@ -367,6 +373,7 @@ class MultiRelayEnvironment:
         reward_terms["failure_penalty"] = 1.0
         info = self._info(
             old_states,
+            requested_actions,
             requested,
             applied,
             interventions,
@@ -525,6 +532,7 @@ class MultiRelayEnvironment:
     def _info(
         self,
         states: tuple[UAVState, ...],
+        requested_actions: np.ndarray,
         requested: np.ndarray,
         applied: np.ndarray,
         interventions: np.ndarray,
@@ -534,6 +542,12 @@ class MultiRelayEnvironment:
     ) -> dict[str, object]:
         positions = np.stack([state.position_m for state in states])
         velocities = np.stack([state.velocity_mps for state in states])
+        applied_actions = np.stack(
+            [
+                velocity_to_normalized_action(velocity, self.config.relay_motion_limits)
+                for velocity in applied
+            ]
+        )
         minimum_distance = min(
             float(np.linalg.norm(positions[first] - positions[second]))
             for first, second in combinations(range(len(states)), 2)
@@ -541,6 +555,8 @@ class MultiRelayEnvironment:
         return {
             "positions_m": positions.copy(),
             "velocities_mps": velocities.copy(),
+            "requested_relay_actions": np.asarray(requested_actions, dtype=float).copy(),
+            "applied_relay_actions": applied_actions.copy(),
             "requested_relay_velocities_mps": requested.copy(),
             "applied_relay_velocities_mps": applied.copy(),
             "intervention_norms": interventions.copy(),

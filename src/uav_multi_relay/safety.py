@@ -75,6 +75,36 @@ def normalized_action_to_velocity(action: object, limits: MotionLimits) -> np.nd
     return np.array([horizontal[0], horizontal[1], vertical], dtype=float)
 
 
+def velocity_to_normalized_action(
+    velocity_mps: object, limits: MotionLimits
+) -> np.ndarray:
+    """Map one feasible physical relay velocity back to a normalized action."""
+    velocity = _vector3(velocity_mps, "velocity_mps")
+    horizontal_limit = limits.max_horizontal_speed_mps
+    horizontal_norm = float(np.linalg.norm(velocity[:2]))
+    horizontal_tolerance = 1e-9 * max(1.0, horizontal_limit)
+    climb_tolerance = 1e-9 * max(1.0, limits.max_climb_speed_mps)
+    descent_tolerance = 1e-9 * max(1.0, limits.max_descent_speed_mps)
+    if horizontal_norm > horizontal_limit + horizontal_tolerance:
+        raise ValueError("horizontal velocity exceeds the configured limit")
+    if velocity[2] > limits.max_climb_speed_mps + climb_tolerance:
+        raise ValueError("climb velocity exceeds the configured limit")
+    if velocity[2] < -limits.max_descent_speed_mps - descent_tolerance:
+        raise ValueError("descent velocity exceeds the configured limit")
+
+    horizontal = velocity[:2] / horizontal_limit
+    horizontal_action_norm = float(np.linalg.norm(horizontal))
+    if horizontal_action_norm > 1.0:
+        horizontal *= 1.0 / horizontal_action_norm
+    vertical = (
+        velocity[2] / limits.max_climb_speed_mps
+        if velocity[2] >= 0.0
+        else velocity[2] / limits.max_descent_speed_mps
+    )
+    result = np.array([horizontal[0], horizontal[1], vertical], dtype=float)
+    return np.clip(result, -1.0, 1.0)
+
+
 def filter_relay_velocities(
     relay_states: tuple[UAVState, ...],
     requested_velocities_mps: object,

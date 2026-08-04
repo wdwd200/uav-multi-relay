@@ -22,6 +22,7 @@ from uav_multi_relay.safety import (
     NoFeasibleActionError,
     filter_relay_velocities,
     normalized_action_to_velocity,
+    velocity_to_normalized_action,
 )
 from uav_multi_relay.trajectories import WaypointFollower
 
@@ -303,6 +304,24 @@ def test_action_mapping_scales_horizontal_vectors_and_vertical_signs() -> None:
     assert velocity[2] == pytest.approx(-2.0)
 
 
+def test_velocity_to_normalized_action_round_trips_feasible_velocities() -> None:
+    limits = MotionLimits(10.0, 3.0, 4.0, 1.0, 1.0)
+    velocity = np.array([6.0, -8.0, -2.0])
+    normalized = velocity_to_normalized_action(velocity, limits)
+    assert np.all(np.isfinite(normalized))
+    assert np.all(normalized >= -1.0) and np.all(normalized <= 1.0)
+    assert normalized_action_to_velocity(normalized, limits) == pytest.approx(velocity)
+
+
+@pytest.mark.parametrize(
+    "velocity",
+    [[10.1, 0.0, 0.0], [0.0, 0.0, 3.1], [0.0, 0.0, -4.1], [np.nan, 0.0, 0.0]],
+)
+def test_velocity_to_normalized_action_rejects_infeasible_velocities(velocity: list[float]) -> None:
+    with pytest.raises(ValueError):
+        velocity_to_normalized_action(velocity, MotionLimits(10.0, 3.0, 4.0, 1.0, 1.0))
+
+
 def test_safety_filter_checks_all_hard_constraints() -> None:
     limits = MotionLimits(10.0, 3.0, 3.0, 20.0, 20.0)
     bounds = FlightBounds([-20.0, -20.0, -20.0], [20.0, 20.0, 20.0])
@@ -365,6 +384,30 @@ def test_step_updates_every_uav_once_and_reports_communication() -> None:
     assert np.allclose(
         info["requested_relay_velocities_mps"], actions * env.config.relay_motion_limits.max_horizontal_speed_mps
     )
+
+
+def test_info_reports_requested_and_executed_normalized_actions_as_copies() -> None:
+    env = MultiRelayEnvironment()
+    _, reset_info = env.reset(seed=0)
+    assert np.array_equal(reset_info["requested_relay_actions"], np.zeros((4, 3)))
+    assert np.array_equal(reset_info["applied_relay_actions"], np.zeros((4, 3)))
+    requested = np.ones((4, 3))
+    _, _, terminated, _, info = env.step(requested)
+    assert not terminated
+    assert np.array_equal(info["requested_relay_actions"], requested)
+    remapped = np.stack(
+        [
+            velocity_to_normalized_action(velocity, env.config.relay_motion_limits)
+            for velocity in info["applied_relay_velocities_mps"]
+        ]
+    )
+    assert np.allclose(info["applied_relay_actions"], remapped)
+    assert np.any(info["applied_relay_actions"] != requested)
+    applied_velocity = env.relay_states[0].velocity_mps.copy()
+    info["applied_relay_actions"][0] = 0.0
+    requested[0] = 0.0
+    assert np.array_equal(env.relay_states[0].velocity_mps, applied_velocity)
+    assert not np.array_equal(info["requested_relay_actions"], requested)
 
 
 def test_info_arrays_are_copies_and_reward_terms_are_finite() -> None:
