@@ -4,6 +4,7 @@ import pytest
 from uav_multi_relay.baselines import equal_spacing_actions
 from uav_multi_relay.config import (
     ChannelConfig,
+    EndpointTrajectoryConfig,
     EnvironmentConfig,
     FlightBounds,
     default_environment_config,
@@ -49,6 +50,15 @@ def test_configuration_rejects_invalid_bounds_and_channel() -> None:
             1,
             ChannelConfig(2.4e9, 1, 2, 1, 1, 1, 1, 1, 0.1, 1),
         )
+
+
+def test_endpoint_trajectory_configuration_is_validated() -> None:
+    with pytest.raises(ValueError):
+        EndpointTrajectoryConfig(10.0, 10.0, 3.0, 4, 2.0)
+    with pytest.raises(ValueError):
+        EndpointTrajectoryConfig(10.0, 20.0, 2.0, 4, 2.0)
+    with pytest.raises(ValueError):
+        EndpointTrajectoryConfig(10.0, 20.0, 3.0, 1, 2.0)
     with pytest.raises(ValueError):
         EnvironmentConfig(
             1,
@@ -141,19 +151,22 @@ def test_variable_relay_count_initialization_is_hard_feasible(num_relays: int) -
 
 def test_small_custom_bounds_are_supported_when_chain_is_feasible() -> None:
     base = default_environment_config()
+    endpoint_limits = MotionLimits(2.0, 1.0, 1.0, 2.0, 2.0)
     config = EnvironmentConfig(
         1,
         base.delta_t_s,
         base.max_steps,
         base.relay_motion_limits,
-        base.high_motion_limits,
-        base.low_motion_limits,
+        endpoint_limits,
+        endpoint_limits,
         FlightBounds(np.array([-20.0, -20.0, -20.0]), np.array([20.0, 20.0, 20.0])),
         5.0,
         8.0,
         30.0,
         base.rate_reference_bps,
         base.channel,
+        EndpointTrajectoryConfig(5.0, 15.0, 4.0, 4, 2.0),
+        EndpointTrajectoryConfig(-15.0, -5.0, 4.0, 4, 2.0),
     )
     env = MultiRelayEnvironment(config)
     _, info = env.reset(seed=4)
@@ -176,9 +189,82 @@ def test_impossible_initial_chain_has_clear_value_error() -> None:
         2.0,
         base.rate_reference_bps,
         base.channel,
+        EndpointTrajectoryConfig(0.6, 0.9, 0.2, 4, 0.1),
+        EndpointTrajectoryConfig(0.1, 0.4, 0.2, 4, 0.1),
     )
     with pytest.raises(ValueError, match="unable to construct"):
         MultiRelayEnvironment(config).reset(seed=0)
+
+
+def test_default_endpoint_altitudes_are_separated_for_many_seeds() -> None:
+    config = default_environment_config()
+    for seed in range(100):
+        _, info = MultiRelayEnvironment(config).reset(seed=seed)
+        high_altitude = info["positions_m"][0, 2]
+        low_altitude = info["positions_m"][-1, 2]
+        assert config.high_trajectory.altitude_min_m <= high_altitude <= config.high_trajectory.altitude_max_m
+        assert config.low_trajectory.altitude_min_m <= low_altitude <= config.low_trajectory.altitude_max_m
+        assert high_altitude > low_altitude
+
+
+@pytest.mark.parametrize("maximum_link_distance", [10.0, 10.001])
+def test_constructive_initialization_handles_exact_and_narrow_link_ranges(
+    maximum_link_distance: float,
+) -> None:
+    base = default_environment_config()
+    config = EnvironmentConfig(
+        4,
+        base.delta_t_s,
+        base.max_steps,
+        base.relay_motion_limits,
+        base.high_motion_limits,
+        base.low_motion_limits,
+        FlightBounds(np.array([-100.0, -100.0, 0.0]), np.array([100.0, 100.0, 100.0])),
+        10.0,
+        15.0,
+        maximum_link_distance,
+        base.rate_reference_bps,
+        base.channel,
+        EndpointTrajectoryConfig(55.0, 60.0, 5.0, 4, 2.0),
+        EndpointTrajectoryConfig(40.0, 45.0, 5.0, 4, 2.0),
+    )
+    for seed in range(20):
+        _, info = MultiRelayEnvironment(config).reset(seed=seed)
+        links = np.linalg.norm(np.diff(info["positions_m"], axis=0), axis=1)
+        assert np.all(links >= 10.0 - 1e-9)
+        assert np.all(links <= maximum_link_distance + 1e-9)
+
+
+@pytest.mark.parametrize("seed", [5169, 6397])
+def test_specified_seeds_move_both_endpoints(seed: int) -> None:
+    env = MultiRelayEnvironment()
+    _, reset_info = env.reset(seed=seed)
+    initial_endpoints = reset_info["positions_m"][[0, -1]].copy()
+    for _ in range(20):
+        _, _, terminated, _, info = env.step(np.zeros((4, 3)))
+        assert not terminated
+    assert np.linalg.norm(info["positions_m"][[0, -1]] - initial_endpoints) > 0.0
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_equal_spacing_baseline_completes_default_episode(seed: int) -> None:
+    env = MultiRelayEnvironment()
+    env.reset(seed=seed)
+    for _ in range(env.config.max_steps):
+        _, _, terminated, truncated, info = env.step(equal_spacing_actions(env))
+        assert not terminated
+        positions = info["positions_m"]
+        pairwise = np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=2)
+        pairwise[np.diag_indices_from(pairwise)] = np.inf
+        assert np.all(positions >= env.config.flight_bounds.minimum_m)
+        assert np.all(positions <= env.config.flight_bounds.maximum_m)
+        assert np.min(pairwise) >= env.config.hard_safety_distance_m - 1e-9
+        assert np.all(
+            np.linalg.norm(np.diff(positions, axis=0), axis=1)
+            <= env.config.hard_max_link_distance_m + 1e-9
+        )
+        assert np.all(np.isfinite(positions))
+    assert truncated
 
 
 def test_reset_is_seed_deterministic_and_observations_have_required_shapes() -> None:

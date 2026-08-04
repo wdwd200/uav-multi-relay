@@ -14,7 +14,11 @@ from .communication import (
     shannon_capacity_bps,
     snr_linear,
 )
-from .config import EnvironmentConfig, default_environment_config
+from .config import (
+    EndpointTrajectoryConfig,
+    EnvironmentConfig,
+    default_environment_config,
+)
 from .core import UAVState
 from .kinematics import advance_state
 from .safety import (
@@ -78,8 +82,14 @@ class MultiRelayEnvironment:
         self._high_follower.reset()
         self._low_follower.reset()
         high_position, relay_positions, low_position = self._sample_initial_chain()
-        self._high_follower = WaypointFollower(self._make_endpoint_waypoints(high_position))
-        self._low_follower = WaypointFollower(self._make_endpoint_waypoints(low_position))
+        self._high_follower = WaypointFollower(
+            self._make_endpoint_waypoints(high_position, self.config.high_trajectory),
+            arrival_tolerance_m=self.config.high_trajectory.arrival_tolerance_m,
+        )
+        self._low_follower = WaypointFollower(
+            self._make_endpoint_waypoints(low_position, self.config.low_trajectory),
+            arrival_tolerance_m=self.config.low_trajectory.arrival_tolerance_m,
+        )
         self._states = (
             UAVState("H", high_position, np.zeros(3)),
             *tuple(
@@ -196,55 +206,151 @@ class MultiRelayEnvironment:
         return array.copy()
 
     def _sample_initial_chain(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Sample endpoint anchors until a complete hard-feasible chain exists."""
+        """Construct a hard-feasible H-to-L line segment and equally spaced relays."""
         bounds = self.config.flight_bounds
-        span = bounds.maximum_m - bounds.minimum_m
-        path_radius = min(
-            0.25 * self.config.hard_safety_distance_m,
-            0.03 * float(np.min(span)),
+        high_trajectory = self.config.high_trajectory
+        low_trajectory = self.config.low_trajectory
+        waypoint_radius = max(
+            high_trajectory.waypoint_radius_m,
+            low_trajectory.waypoint_radius_m,
         )
-        boundary_margin = min(
-            0.15 * float(np.min(span)),
-            max(self.config.hard_safety_distance_m, path_radius),
+        endpoint_turn_margin = max(
+            limits.max_horizontal_speed_mps**2
+            / (2.0 * limits.max_horizontal_accel_mps2)
+            + limits.max_horizontal_speed_mps * self.config.delta_t_s
+            for limits in (
+                self.config.high_motion_limits,
+                self.config.low_motion_limits,
+            )
+        ) + max(
+            high_trajectory.arrival_tolerance_m,
+            low_trajectory.arrival_tolerance_m,
         )
-        lower = bounds.minimum_m + boundary_margin
-        upper = bounds.maximum_m - boundary_margin
-        if np.any(lower >= upper):
-            lower = bounds.minimum_m.copy()
-            upper = bounds.maximum_m.copy()
+        inset = waypoint_radius + endpoint_turn_margin
+        horizontal_lower = bounds.minimum_m[:2] + inset
+        horizontal_upper = bounds.maximum_m[:2] - inset
+        if np.any(horizontal_lower > horizontal_upper):
+            raise ValueError(
+                "unable to construct a hard-feasible initial relay chain: "
+                "flight bounds leave no room for configured endpoint waypoint radius"
+            )
 
-        for _ in range(2048):
-            high = self._rng.uniform(lower, upper)
-            low = self._rng.uniform(lower, upper)
-            relay_positions = np.linspace(high, low, self.config.num_relays + 2)[1:-1]
-            positions = np.vstack((high, relay_positions, low))
-            if not all(bounds.contains(position) for position in positions):
-                continue
-            pairwise = positions[:, np.newaxis, :] - positions[np.newaxis, :, :]
-            distances = np.linalg.norm(pairwise, axis=2)
-            np.fill_diagonal(distances, np.inf)
-            if float(np.min(distances)) < self.config.hard_safety_distance_m:
-                continue
-            adjacent = np.linalg.norm(np.diff(positions, axis=0), axis=1)
-            if np.any(adjacent > self.config.hard_max_link_distance_m):
-                continue
-            return high, relay_positions, low
-        raise ValueError(
-            "unable to construct a hard-feasible initial relay chain for the configured bounds"
+        segment_count = self.config.num_relays + 1
+        total_minimum = segment_count * self.config.hard_safety_distance_m
+        total_maximum = segment_count * self.config.hard_max_link_distance_m
+        horizontal_span = horizontal_upper - horizontal_lower
+        horizontal_diagonal = float(np.linalg.norm(horizontal_span))
+        gap_minimum = high_trajectory.altitude_min_m - low_trajectory.altitude_max_m
+        gap_maximum = high_trajectory.altitude_max_m - low_trajectory.altitude_min_m
+        gap_lower = max(
+            gap_minimum,
+            float(np.sqrt(max(total_minimum**2 - horizontal_diagonal**2, 0.0))),
         )
+        gap_upper = min(gap_maximum, total_maximum)
+        if gap_lower > gap_upper:
+            raise ValueError(
+                "unable to construct a hard-feasible initial relay chain for the configured bounds"
+            )
+        altitude_gap = float(self._rng.uniform(gap_lower, gap_upper))
+        low_altitude_lower = max(
+            low_trajectory.altitude_min_m,
+            high_trajectory.altitude_min_m - altitude_gap,
+        )
+        low_altitude_upper = min(
+            low_trajectory.altitude_max_m,
+            high_trajectory.altitude_max_m - altitude_gap,
+        )
+        if low_altitude_lower > low_altitude_upper:
+            raise ValueError("unable to select endpoint altitudes for the configured trajectory ranges")
+        low_altitude = float(self._rng.uniform(low_altitude_lower, low_altitude_upper))
+        high_altitude = low_altitude + altitude_gap
 
-    def _make_endpoint_waypoints(self, anchor: np.ndarray) -> np.ndarray:
-        """Create a seed-controlled, bounded cyclic path near an endpoint anchor."""
+        total_lower = max(total_minimum, altitude_gap)
+        total_upper = min(
+            total_maximum,
+            float(np.sqrt(horizontal_diagonal**2 + altitude_gap**2)),
+        )
+        if total_lower > total_upper:
+            raise ValueError(
+                "unable to construct a hard-feasible initial relay chain for the configured bounds"
+            )
+        preferred_total = segment_count * (
+            self.config.hard_safety_distance_m + self.config.hard_max_link_distance_m
+        ) / 2.0
+        total_distance = float(np.clip(preferred_total, total_lower, total_upper))
+        horizontal_distance = float(
+            np.sqrt(max(total_distance**2 - altitude_gap**2, 0.0))
+        )
+        horizontal_delta = self._horizontal_delta(horizontal_distance, horizontal_span)
+        low_horizontal = self._sample_low_horizontal(
+            horizontal_delta, horizontal_lower, horizontal_upper
+        )
+        high_horizontal = low_horizontal + horizontal_delta
+        high = np.array([high_horizontal[0], high_horizontal[1], high_altitude])
+        low = np.array([low_horizontal[0], low_horizontal[1], low_altitude])
+        relay_positions = np.linspace(high, low, segment_count + 1)[1:-1]
+        positions = np.vstack((high, relay_positions, low))
+        if not all(bounds.contains(position) for position in positions):
+            raise ValueError("constructed initial relay chain is outside flight bounds")
+        adjacent = np.linalg.norm(np.diff(positions, axis=0), axis=1)
+        if (
+            np.any(adjacent < self.config.hard_safety_distance_m - 1e-9)
+            or np.any(adjacent > self.config.hard_max_link_distance_m + 1e-9)
+        ):
+            raise ValueError("constructed initial relay chain violates hard link constraints")
+        return high, relay_positions, low
+
+    def _horizontal_delta(self, distance: float, span: np.ndarray) -> np.ndarray:
+        """Return a seeded signed 2D vector of the requested length that fits a box."""
+        if distance == 0.0:
+            return np.zeros(2)
+        if distance <= span[0]:
+            components = np.array([distance, 0.0])
+        elif distance <= span[1]:
+            components = np.array([0.0, distance])
+        else:
+            first = min(distance, span[0])
+            second = float(np.sqrt(max(distance**2 - first**2, 0.0)))
+            if second > span[1] + 1e-9:
+                raise ValueError("configured flight bounds cannot contain the initial relay chain")
+            components = np.array([first, second])
+        signs = self._rng.choice(np.array([-1.0, 1.0]), size=2)
+        return components * signs
+
+    def _sample_low_horizontal(
+        self, delta: np.ndarray, lower: np.ndarray, upper: np.ndarray
+    ) -> np.ndarray:
+        low_lower = lower + np.maximum(-delta, 0.0)
+        low_upper = upper - np.maximum(delta, 0.0)
+        if np.any(low_lower > low_upper):
+            raise ValueError("configured flight bounds cannot contain the initial relay chain")
+        return self._rng.uniform(low_lower, low_upper)
+
+    def _make_endpoint_waypoints(
+        self, anchor: np.ndarray, trajectory: EndpointTrajectoryConfig
+    ) -> np.ndarray:
+        """Create a bounded seeded loop with at least one unreached waypoint."""
         bounds = self.config.flight_bounds
-        span = bounds.maximum_m - bounds.minimum_m
-        radius = min(
-            0.25 * self.config.hard_safety_distance_m,
-            0.03 * float(np.min(span)),
-        )
         waypoints = [anchor.copy()]
-        for _ in range(3):
-            offset = self._rng.uniform(-radius, radius, size=3)
-            waypoints.append(np.clip(anchor + offset, bounds.minimum_m, bounds.maximum_m))
+        phase = float(self._rng.uniform(0.0, 2.0 * np.pi))
+        for index in range(1, trajectory.waypoint_count):
+            angle = phase + 2.0 * np.pi * index / trajectory.waypoint_count
+            horizontal_offset = trajectory.waypoint_radius_m * np.array(
+                [np.cos(angle), np.sin(angle)]
+            )
+            altitude = float(
+                self._rng.uniform(trajectory.altitude_min_m, trajectory.altitude_max_m)
+            )
+            waypoint = np.array(
+                [
+                    anchor[0] + horizontal_offset[0],
+                    anchor[1] + horizontal_offset[1],
+                    altitude,
+                ]
+            )
+            if not bounds.contains(waypoint):
+                raise ValueError("configured endpoint waypoint is outside flight bounds")
+            waypoints.append(waypoint)
         return np.asarray(waypoints, dtype=float)
 
     def _terminate_for_candidate(

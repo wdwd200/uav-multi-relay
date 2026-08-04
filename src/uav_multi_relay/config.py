@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -80,6 +80,51 @@ class ChannelConfig:
 
 
 @dataclass(frozen=True)
+class EndpointTrajectoryConfig:
+    """Altitude and waypoint parameters for one endpoint UAV."""
+
+    altitude_min_m: float
+    altitude_max_m: float
+    waypoint_radius_m: float
+    waypoint_count: int
+    arrival_tolerance_m: float
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "altitude_min_m", float(self.altitude_min_m))
+        object.__setattr__(self, "altitude_max_m", float(self.altitude_max_m))
+        object.__setattr__(self, "waypoint_radius_m", float(self.waypoint_radius_m))
+        object.__setattr__(self, "arrival_tolerance_m", float(self.arrival_tolerance_m))
+        if not all(
+            np.isfinite(value)
+            for value in (
+                self.altitude_min_m,
+                self.altitude_max_m,
+                self.waypoint_radius_m,
+                self.arrival_tolerance_m,
+            )
+        ):
+            raise ValueError("endpoint trajectory values must be finite")
+        if self.altitude_min_m >= self.altitude_max_m:
+            raise ValueError("altitude_min_m must be less than altitude_max_m")
+        if self.waypoint_radius_m <= self.arrival_tolerance_m or self.arrival_tolerance_m <= 0:
+            raise ValueError("waypoint_radius_m must be greater than arrival_tolerance_m > 0")
+        if (
+            isinstance(self.waypoint_count, bool)
+            or not isinstance(self.waypoint_count, int)
+            or self.waypoint_count < 2
+        ):
+            raise ValueError("waypoint_count must be an integer of at least 2")
+
+
+def _default_high_trajectory() -> EndpointTrajectoryConfig:
+    return EndpointTrajectoryConfig(170.0, 230.0, 30.0, 4, 2.0)
+
+
+def _default_low_trajectory() -> EndpointTrajectoryConfig:
+    return EndpointTrajectoryConfig(50.0, 110.0, 30.0, 4, 2.0)
+
+
+@dataclass(frozen=True)
 class EnvironmentConfig:
     """Configuration for a synchronous multi-relay simulation episode."""
 
@@ -95,6 +140,8 @@ class EnvironmentConfig:
     hard_max_link_distance_m: float
     rate_reference_bps: float
     channel: ChannelConfig
+    high_trajectory: EndpointTrajectoryConfig = field(default_factory=_default_high_trajectory)
+    low_trajectory: EndpointTrajectoryConfig = field(default_factory=_default_low_trajectory)
 
     def __post_init__(self) -> None:
         if isinstance(self.num_relays, bool) or not isinstance(self.num_relays, int) or self.num_relays < 1:
@@ -128,6 +175,23 @@ class EnvironmentConfig:
             raise ValueError("flight_bounds must be a FlightBounds instance")
         if not isinstance(self.channel, ChannelConfig):
             raise ValueError("channel must be a ChannelConfig instance")
+        if not isinstance(self.high_trajectory, EndpointTrajectoryConfig):
+            raise ValueError("high_trajectory must be an EndpointTrajectoryConfig instance")
+        if not isinstance(self.low_trajectory, EndpointTrajectoryConfig):
+            raise ValueError("low_trajectory must be an EndpointTrajectoryConfig instance")
+        lower_altitude = self.flight_bounds.minimum_m[2]
+        upper_altitude = self.flight_bounds.maximum_m[2]
+        for name, trajectory in (
+            ("high_trajectory", self.high_trajectory),
+            ("low_trajectory", self.low_trajectory),
+        ):
+            if (
+                trajectory.altitude_min_m < lower_altitude
+                or trajectory.altitude_max_m > upper_altitude
+            ):
+                raise ValueError(f"{name} altitude range must be within flight bounds")
+        if self.high_trajectory.altitude_min_m <= self.low_trajectory.altitude_max_m:
+            raise ValueError("high_trajectory altitude range must be strictly above low_trajectory")
 
 
 def default_environment_config() -> EnvironmentConfig:
@@ -158,4 +222,6 @@ def default_environment_config() -> EnvironmentConfig:
             minimum_antenna_gain_linear=0.1,
             minimum_distance_m=1.0,
         ),
+        high_trajectory=_default_high_trajectory(),
+        low_trajectory=_default_low_trajectory(),
     )

@@ -1,92 +1,137 @@
-# Codex 任务：修复阶段 2 初始化与轨迹
+# Codex 任务：阶段 2 第二次修复——可靠初始化与有效端点轨迹
 
 ## 目标
 
-修复阶段 2 的一般 K 初始化、随机轨迹、航点死区和配置可行性问题。
+修复以下问题：
 
-不要开始强化学习，不要新增测试文件。
+1. 可行配置依赖随机碰运气才能初始化；
+2. H 没有保持高空源 UAV 语义；
+3. 某些 seed 会让 H 或 L 永久静止。
+
+不要开始强化学习，不要修改观测结构，不要新增测试文件。
 
 ## 允许修改
 
 - `src/uav_multi_relay/config.py`
-- `src/uav_multi_relay/trajectories.py`
 - `src/uav_multi_relay/environment.py`
+- `src/uav_multi_relay/trajectories.py`
 - `tests/test_environment.py`
 - `README.md`
 - `AGENTS.md`
 - `aaa.md`
 
-## 1. 配置可行性
+## 1. 增加端点轨迹配置
 
-在 `EnvironmentConfig` 中要求：
+在 `config.py` 中增加不可变数据类：
 
-```text
-hard_max_link_distance_m >= hard_safety_distance_m
+```python
+EndpointTrajectoryConfig
 ```
 
-不满足时抛出 `ValueError`。
-
-## 2. 配置驱动的 reset
-
-删除 `reset()` 中固定的：
+字段：
 
 ```text
-H = [-300, 0, 150]
-L = [300, 0, 150]
+altitude_min_m
+altitude_max_m
+waypoint_radius_m
+waypoint_count
+arrival_tolerance_m
 ```
-
-根据以下配置生成初始链路：
-
-```text
-flight_bounds
-num_relays
-hard_safety_distance_m
-hard_max_link_distance_m
-seed
-```
-
-必须保证：
-
-- H、全部中继和 L 都在飞行边界内；
-- 所有 UAV 两两距离不小于硬安全距离；
-- 所有相邻逻辑链路不超过硬链路上限；
-- 中继初始位置沿 H 到 L 合理分布；
-- `K=1`、`K=4`、`K=8` 均可正常重置；
-- 对无法构造合法链路的配置，抛出说明明确的 `ValueError`；
-- 不得返回已经违反约束的初始状态。
-
-## 3. 使用 seed 生成 H/L 轨迹
-
-在每次 `reset(seed=...)` 时，根据环境随机数生成 H 和 L 各自的循环航点。
 
 要求：
 
-- 所有航点位于飞行边界内并保留合理边界余量；
-- H 和 L 使用不同航点；
-- 相同 seed 产生相同初始化和轨迹；
-- 不同 seed 在前 20 步内产生不同的 H/L 位置轨迹；
-- 轨迹仍通过 `WaypointFollower`、速度限制和加速度限制执行；
-- H/L 候选位置出界时不得提交状态，应终止并在 `info` 中记录原因。
+- 数值有限；
+- `altitude_min_m < altitude_max_m`；
+- `waypoint_radius_m > arrival_tolerance_m > 0`；
+- `waypoint_count >= 2`。
 
-不要使用全局 `np.random`，只使用环境的 `self._rng`。
+在 `EnvironmentConfig` 中增加：
 
-## 4. 修复航点停止死区
-
-`WaypointFollower` 的“到达判断”和“生成速度判断”必须使用一致的距离标准。
-
-当三维距离大于 `arrival_tolerance_m` 时，在初始速度为零且限制允许的情况下，返回速度不得因为水平和垂直分量分别小于容差而变成全零。
-
-增加回归测试：
-
-```python
-state = UAVState("H", [0, 0, 0], [0, 0, 0])
-waypoint = [1.5, 0, 1.5]
-arrival_tolerance_m = 2.0
+```text
+high_trajectory
+low_trajectory
 ```
 
-三维距离大于 2，因此生成速度必须非零。
+要求：
 
-## 5. 加强测试
+- 两个高度区间都位于 `flight_bounds` 的垂直范围内；
+- 必须满足：
+
+```text
+high_trajectory.altitude_min_m
+>
+low_trajectory.altitude_max_m
+```
+
+默认配置使用：
+
+```text
+H 高度范围：170–230 m
+L 高度范围：50–110 m
+航点半径：30 m
+航点数量：4
+到达容差：2 m
+```
+
+## 2. 改为构造式初始化
+
+重写 `_sample_initial_chain()`。
+
+不要再通过随机采两个端点并最多重试 2048 次来碰运气。
+
+相邻节点间距必须处于：
+
+```text
+[hard_safety_distance_m, hard_max_link_distance_m]
+```
+
+端点总距离必须处于：
+
+```text
+[(K + 1) * hard_safety_distance_m,
+ (K + 1) * hard_max_link_distance_m]
+```
+
+直接在飞行区域内构造一条满足该距离区间的线段，再用 `np.linspace()` 放置中继。
+
+要求：
+
+- H 高度位于 H 高度区间；
+- L 高度位于 L 高度区间；
+- 所有节点在边界内；
+- 所有两两距离满足硬安全距离；
+- 所有相邻链路满足硬链路上限；
+- 相同 seed 结果一致；
+- 不得依赖随机数恰好落入很窄的距离区间；
+- 数学上无法构造时才抛出明确的 `ValueError`。
+
+必须支持：
+
+```text
+hard_safety_distance_m == hard_max_link_distance_m
+```
+
+## 3. 保证端点轨迹有效
+
+生成 H/L 航点时使用各自的：
+
+```text
+高度区间
+waypoint_radius_m
+waypoint_count
+arrival_tolerance_m
+```
+
+要求：
+
+- 航点全部位于飞行边界和对应高度区间内；
+- 只使用 `self._rng`；
+- H 和 L 使用不同航点序列；
+- 每个端点至少有一个航点与初始位置的距离大于到达容差；
+- 不允许全部航点都被 `WaypointFollower` 当作已经到达；
+- 保持现有速度和加速度可行化流程。
+
+## 4. 测试
 
 仍然只修改：
 
@@ -94,30 +139,46 @@ arrival_tolerance_m = 2.0
 tests/test_environment.py
 ```
 
-增加或加强以下测试：
+增加或调整测试：
 
-1. 相同 seed 的初始化和 H/L 轨迹一致；
-2. 不同 seed 的前 20 步 H/L 轨迹不同；
-3. `K=1`、`K=4`、`K=8` 重置后全部硬约束成立；
-4. 使用较小但可行的自定义 `FlightBounds` 时，所有节点仍在边界内；
-5. 不可能构造链路的配置明确抛出 `ValueError`；
-6. `hard_max_link_distance_m < hard_safety_distance_m` 被拒绝；
-7. 航点停止死区回归测试；
-8. 明确断言 H 和 L 在若干步内实际发生位移；
-9. 等距基线运行 500 步，每个已提交状态都满足：
-   - 所有 UAV 在边界内；
-   - 两两安全距离；
-   - 相邻链路距离；
-   - 无 NaN。
+1. 默认配置在 `seed=0..99` 下始终满足：
+   ```text
+   H.z > L.z
+   ```
+   且两者位于对应高度区间；
 
-不要创建新的测试文件。
+2. 构造一个可行配置，其中：
+   ```text
+   hard_safety_distance_m = 10
+   hard_max_link_distance_m = 10
+   ```
+   在 `seed=0..19` 下全部能够 reset；
 
-## 6. README
+3. 构造一个可行窄区间配置：
+   ```text
+   hard_safety_distance_m = 10
+   hard_max_link_distance_m = 10.001
+   ```
+   在 `seed=0..19` 下全部能够 reset；
+
+4. 使用 `seed=5169` 和 `seed=6397`，运行 20 步后 H 和 L 都必须发生非零位移；
+
+5. 等距基线使用 `seed=0、1、2` 各运行完整 500 步：
+   - 不得提前 terminated；
+   - 最终正常 truncated；
+   - 每个已提交状态满足边界、安全距离和链路限制；
+   - 不出现 NaN。
+
+不要新增测试文件。
+
+## 5. README
 
 补充说明：
 
-- H/L 航点由 seed 可复现地随机生成；
-- 环境支持一般 K，但配置必须存在可行初始链路。
+- H 使用高空轨迹区间；
+- L 使用较低任务轨迹区间；
+- 初始链路采用构造式生成，不依赖随机拒绝采样；
+- seed 控制初始化和航点。
 
 ## 验证
 
@@ -137,7 +198,7 @@ python -m pytest
 
 ```bash
 git add .
-git commit -m "fix: make environment initialization configuration-aware"
+git commit -m "fix: construct reliable endpoint trajectories"
 git push
 ```
 
@@ -146,8 +207,8 @@ git push
 ```markdown
 # 本次执行结果
 
-- 阶段：2 修复
-- 任务：一般 K 初始化与随机轨迹
+- 阶段：2 第二次修复
+- 任务：可靠初始化与有效端点轨迹
 - 完成状态：
 - 修改文件：
 - 测试结果：
@@ -162,7 +223,7 @@ git push
 
 ```bash
 git add aaa.md
-git commit -m "docs: record stage-2 repair result"
+git commit -m "docs: record stage-2 trajectory repair"
 git push
 git status
 ```
@@ -173,13 +234,14 @@ git status
 
 不要实现：
 
-- Gymnasium 或 PettingZoo
+- 新观测结构
+- 新奖励
+- 新基线
+- Gymnasium
 - replay buffer
 - MASAC、SAC、MAPPO
 - 神经网络
 - 训练脚本
-- MPC
-- 动态路由
 - 新测试文件
 
 完成后只回复：

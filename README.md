@@ -18,6 +18,9 @@ The logical topology is `H -> R1 -> ... -> RK -> L`.
 The environment accepts relay actions with shape `(K, 3)` in `[-1, 1]`.
 H/L waypoint paths are generated reproducibly from `reset(seed=...)`, and the
 configuration must admit a hard-feasible initial chain for its chosen `K`.
+H follows a higher altitude trajectory band, while L follows a lower task
+trajectory band. The initial chain is constructed from the configured distance
+limits rather than accepted by random rejection sampling.
 
 ```python
 import numpy as np
