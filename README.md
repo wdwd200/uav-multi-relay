@@ -12,9 +12,24 @@ The logical topology is `H -> R1 -> ... -> RK -> L`.
 - Multi-hop geometry and air-to-air channel utility functions.
 - Single-hop capacity calculation.
 - Equal-time and analytical optimal TDMA.
+- A synchronous, dependency-free multi-relay dynamic environment.
+- Endpoint waypoint followers, relay safety filtering, observations, rewards, and an equal-spacing baseline.
 
-The following are not yet implemented: a full environment, safety-distance
-filtering, reward functions, and multi-agent reinforcement learning.
+The environment accepts relay actions with shape `(K, 3)` in `[-1, 1]`.
+
+```python
+import numpy as np
+
+from uav_multi_relay import MultiRelayEnvironment
+
+env = MultiRelayEnvironment()
+observation, info = env.reset(seed=0)
+observation, reward, terminated, truncated, info = env.step(
+    np.zeros((env.config.num_relays, 3))
+)
+```
+
+Multi-agent reinforcement learning remains intentionally unimplemented.
 
 ## Installation
 
@@ -25,5 +40,5 @@ python -m pip install -e ".[dev]"
 ## Tests
 
 ```bash
-pytest
+python -m pytest
 ```
