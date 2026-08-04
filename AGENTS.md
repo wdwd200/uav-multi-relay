@@ -1,163 +1,126 @@
-# Codex 任务：阶段 3A——参数共享 MASAC 网络基础
+# Codex 任务：修复阶段 3A 网络结构与测试
 
 ## 目标
 
-实现参数共享随机策略网络和集中式双 Q 网络。
+修复参数共享 Actor 多出一个隐藏线性层的问题，并让测试真正从环境中动态读取维度。
 
-本次只实现神经网络基础，不实现 replay buffer、更新算法或训练循环。
+不要开始 replay buffer、MASAC 更新或训练循环。
 
-## 允许新增
+## 允许修改
+
+- `src/uav_multi_relay/learning/networks.py`
+- `tests/test_learning.py`
+- `AGENTS.md`
+- `aaa.md`
+
+不要新增文件。
+
+## 1. 修复 Actor 网络结构
+
+当前默认 Actor backbone 实际包含三个线性层：
 
 ```text
-src/uav_multi_relay/learning/__init__.py
-src/uav_multi_relay/learning/networks.py
-tests/test_learning.py
+23 -> 256 -> 256 -> 256
 ```
 
-允许修改：
+修复后，`hidden_dims=(256, 256)` 必须严格生成两个隐藏线性层：
 
 ```text
-pyproject.toml
-README.md
-AGENTS.md
-aaa.md
+23 -> 256 -> 256
 ```
 
-不要修改现有环境、物理模型和基线代码。
+然后直接连接：
 
-## 1. PyTorch 依赖
-
-在 `pyproject.toml` 中增加：
-
-```toml
-[project.optional-dependencies]
-learning = ["torch>=2.2"]
-dev = ["pytest", "torch>=2.2"]
-```
-
-保留现有依赖。
-
-基础物理环境在未安装 PyTorch 时仍应能够正常导入。
-
-## 2. 参数共享 Actor
-
-在 `learning/networks.py` 中实现：
-
-```python
-SharedGaussianActor
-```
-
-接口至少包括：
-
-```python
-forward(local_observations)
-sample(local_observations, deterministic=False)
+```text
+mean_head
+log_std_head
 ```
 
 要求：
 
-- 默认局部观测维度为 23；
-- 默认动作维度为 3；
-- 使用两个隐藏层，默认每层 256；
-- 输出高斯分布的 `mean` 和 `log_std`；
-- `log_std` 限制在 `[-20, 2]`；
-- 使用 `Normal.rsample()` 重参数采样；
-- 使用 `tanh` 把动作限制到 `[-1, 1]`；
-- 正确计算 tanh 变换后的 log probability；
-- log probability 对动作维度求和并保留末尾单维；
-- 支持输入形状：
-  ```text
-  (batch, K, local_observation_dim)
-  ```
-- 同一个网络必须同时处理所有中继，不能为每个中继创建独立 Actor；
-- 所有输出必须有限。
+- backbone 中线性层数量等于 `len(hidden_dims)`；
+- 默认 backbone 中恰好有两个 `nn.Linear`；
+- 每个隐藏线性层后使用 `ReLU`；
+- 不改变 Actor 的输入输出接口；
+- 保留任意合法 `hidden_dims` 的支持；
+- 不为各个中继创建独立 Actor；
+- 不改变 tanh 动作和 log probability 公式。
 
-不要在网络中写死 `K=4`。
-
-## 3. 集中式双 Q 网络
-
-实现：
+不要继续使用会额外增加线性层的：
 
 ```python
-CentralizedTwinCritic
+_mlp(input_dim, hidden_dims, hidden_dims[-1])
 ```
 
-初始化参数至少包括：
+## 2. 动态读取环境维度
+
+修改 `tests/test_learning.py`。
+
+从默认环境实际返回的观测中读取：
+
+```python
+num_relays = observation["local"].shape[0]
+local_observation_dim = observation["local"].shape[-1]
+global_state_dim = observation["global"].shape[-1]
+```
+
+使用这些变量构造：
+
+```python
+SharedGaussianActor(
+    local_observation_dim=local_observation_dim,
+)
+
+CentralizedTwinCritic(
+    global_state_dim=global_state_dim,
+    num_relays=num_relays,
+)
+```
+
+不要在该测试中直接写死：
 
 ```text
-global_state_dim
-num_relays
-action_dim
-hidden_dims
+4
+23
+42
 ```
 
-调用接口：
+## 3. 加强高价值测试
 
-```python
-q1, q2 = critic(global_state, joint_actions)
-```
-
-要求：
-
-- `global_state` 形状为 `(batch, global_state_dim)`；
-- `joint_actions` 形状为 `(batch, K, action_dim)`；
-- 内部展平联合动作并与全局状态拼接；
-- Q1 和 Q2 必须是参数独立的两个网络；
-- 输出形状均为 `(batch, 1)`；
-- 不写死全局状态长度或中继数量；
-- 对非法输入形状抛出 `ValueError`；
-- 所有输出必须有限。
-
-## 4. 公开接口
-
-在：
-
-```text
-src/uav_multi_relay/learning/__init__.py
-```
-
-导出：
-
-```python
-SharedGaussianActor
-CentralizedTwinCritic
-```
-
-暂时不要从项目根 `uav_multi_relay.__init__` 导出学习模块。
-
-## 5. 测试
-
-只新增：
+仍然只修改：
 
 ```text
 tests/test_learning.py
 ```
 
-至少验证：
+增加或加强以下检查：
 
-1. 从默认环境动态读取局部和全局观测维度；
-2. Actor 输入 `(5, 4, 23)` 时，动作形状为 `(5, 4, 3)`；
-3. Actor log probability 形状为 `(5, 4, 1)`；
-4. Actor 动作和 log probability 全部有限；
-5. Actor 动作始终位于 `[-1, 1]`；
-6. 确定性动作等于 `tanh(mean)`；
-7. 随机动作反向传播后 Actor 参数获得有限梯度；
-8. Critic 接收批量全局状态和联合动作；
-9. Q1、Q2 形状均为 `(batch, 1)`；
-10. Q1 与 Q2 不共享参数对象；
-11. Critic 反向传播后两个 Q 网络均获得有限梯度；
-12. 非法 Actor 或 Critic 输入形状抛出 `ValueError`。
+1. 默认 Actor backbone 恰好包含两个 `nn.Linear`；
+2. 自定义 `hidden_dims=(64, 32, 16)` 时，backbone 恰好包含三个 `nn.Linear`；
+3. 从环境动态读取维度后，Actor 和 Critic 能完成一次前向传播；
+4. 使用 `K=1` 和 `K=8` 检查网络没有写死四个中继；
+5. Actor 反向传播后，所有可训练参数均有有限梯度；
+6. Critic 反向传播后，Q1 和 Q2 的所有参数均有有限梯度；
+7. 保留现有动作范围、确定性动作、参数独立性和非法形状测试。
 
-测试应小而明确，不要测试 PyTorch 内部实现。
+测试保持小而明确。
 
-## 6. README
+## 4. 基础包无 PyTorch 导入
 
-补充当前状态：
+确认以下行为继续成立：
 
-```text
-已实现参数共享高斯 Actor 和集中式双 Q Critic。
-MASAC 更新、经验回放和训练循环尚未实现。
+```python
+import uav_multi_relay
 ```
+
+项目根包不得导入：
+
+```python
+uav_multi_relay.learning
+torch
+```
+
+不要修改根 `uav_multi_relay/__init__.py`。
 
 ## 验证
 
@@ -171,26 +134,58 @@ python -m pytest
 
 所有测试必须通过。
 
-## Git
-
-先提交代码：
+另外运行：
 
 ```bash
-git add .
-git commit -m "stage-3: add shared actor and twin critic"
+python - <<'PY'
+import torch
+from uav_multi_relay.learning import SharedGaussianActor
+
+actor = SharedGaussianActor()
+linear_count = sum(
+    isinstance(module, torch.nn.Linear)
+    for module in actor.backbone
+)
+assert linear_count == 2
+print("actor hidden layers:", linear_count)
+PY
+```
+
+输出必须为：
+
+```text
+actor hidden layers: 2
+```
+
+## Git
+
+先检查并同步现有提交：
+
+```bash
+git status
+git log --oneline -5
 git push
 ```
 
-然后覆盖 `aaa.md`：
+然后提交本次修复：
+
+```bash
+git add .
+git commit -m "fix: correct shared actor architecture"
+git push
+```
+
+覆盖 `aaa.md`：
 
 ```markdown
 # 本次执行结果
 
-- 阶段：3A
-- 任务：参数共享 MASAC 网络基础
+- 阶段：3A 修复
+- 任务：修复共享 Actor 网络结构与动态维度测试
 - 完成状态：
-- 修改和新增文件：
+- 修改文件：
 - 测试结果：
+- Actor 隐藏层检查：
 - 代码 Commit ID：
 - 当前分支：
 - GitHub 推送结果：
@@ -202,7 +197,7 @@ git push
 
 ```bash
 git add aaa.md
-git commit -m "docs: record stage-3 network result"
+git commit -m "docs: record stage-3 network repair"
 git push
 git status
 ```
@@ -211,22 +206,22 @@ git status
 
 ## 禁止事项
 
-本次不要实现：
+不要实现：
 
 - replay buffer
-- SAC 或 MASAC 损失更新
 - target critic
+- MASAC 或 SAC 损失
 - entropy temperature
 - 训练循环
 - checkpoint
 - MAPPO、MATD3、MADDPG
-- Actor 共享消融
-- 实验脚本
-- 修改环境或奖励函数
+- 新测试文件
+- 环境或奖励修改
 
 完成后只回复：
 
 - 测试结果
+- Actor 隐藏层数量
 - 两个 Commit ID
 - 推送结果
 - 遗留问题

@@ -56,7 +56,12 @@ class SharedGaussianActor(nn.Module):
         self.action_dim = int(action_dim)
         self.log_std_min = float(log_std_bounds[0])
         self.log_std_max = float(log_std_bounds[1])
-        self.backbone = _mlp(self.local_observation_dim, hidden, hidden[-1])
+        backbone_layers: list[nn.Module] = []
+        current_dim = self.local_observation_dim
+        for hidden_dim in hidden:
+            backbone_layers.extend((nn.Linear(current_dim, hidden_dim), nn.ReLU()))
+            current_dim = hidden_dim
+        self.backbone = nn.Sequential(*backbone_layers)
         self.mean_head = nn.Linear(hidden[-1], self.action_dim)
         self.log_std_head = nn.Linear(hidden[-1], self.action_dim)
 
