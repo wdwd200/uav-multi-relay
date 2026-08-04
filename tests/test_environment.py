@@ -49,6 +49,21 @@ def test_configuration_rejects_invalid_bounds_and_channel() -> None:
             1,
             ChannelConfig(2.4e9, 1, 2, 1, 1, 1, 1, 1, 0.1, 1),
         )
+    with pytest.raises(ValueError):
+        EnvironmentConfig(
+            1,
+            0.2,
+            10,
+            MotionLimits(1, 1, 1, 1, 1),
+            MotionLimits(1, 1, 1, 1, 1),
+            MotionLimits(1, 1, 1, 1, 1),
+            FlightBounds([-10, -10, -10], [10, 10, 10]),
+            5,
+            5,
+            4,
+            1,
+            ChannelConfig(2.4e9, 1, 2, 1, 1, 1, 1, 1, 0.1, 1),
+        )
 
 
 def test_waypoint_follower_cycles_and_resets() -> None:
@@ -59,6 +74,111 @@ def test_waypoint_follower_cycles_and_resets() -> None:
     assert velocity[0] > 0.0
     follower.reset()
     assert follower.velocity_for(state, limits, 1.0)[0] > 0.0
+
+
+def test_waypoint_arrival_uses_three_dimensional_tolerance() -> None:
+    state = UAVState("H", [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+    follower = WaypointFollower([[1.5, 0.0, 1.5]], arrival_tolerance_m=2.0)
+    velocity = follower.velocity_for(
+        state, MotionLimits(5.0, 2.0, 2.0, 10.0, 10.0), 1.0
+    )
+    assert np.linalg.norm(velocity) > 0.0
+
+
+def test_same_seed_reproduces_initialization_and_endpoint_trajectories() -> None:
+    first = MultiRelayEnvironment()
+    second = MultiRelayEnvironment()
+    first.reset(seed=11)
+    second.reset(seed=11)
+    for _ in range(20):
+        _, _, first_terminated, _, first_info = first.step(np.zeros((4, 3)))
+        _, _, second_terminated, _, second_info = second.step(np.zeros((4, 3)))
+        assert np.allclose(first_info["positions_m"][[0, -1]], second_info["positions_m"][[0, -1]])
+        assert first_terminated == second_terminated == False
+
+
+def test_different_seeds_produce_different_endpoint_trajectories() -> None:
+    first = MultiRelayEnvironment()
+    second = MultiRelayEnvironment()
+    first.reset(seed=1)
+    second.reset(seed=2)
+    differences = []
+    for _ in range(20):
+        _, _, _, _, first_info = first.step(np.zeros((4, 3)))
+        _, _, _, _, second_info = second.step(np.zeros((4, 3)))
+        differences.append(np.linalg.norm(first_info["positions_m"][[0, -1]] - second_info["positions_m"][[0, -1]]))
+    assert any(difference > 1e-9 for difference in differences)
+
+
+@pytest.mark.parametrize("num_relays", [1, 4, 8])
+def test_variable_relay_count_initialization_is_hard_feasible(num_relays: int) -> None:
+    config = default_environment_config()
+    config = EnvironmentConfig(
+        num_relays,
+        config.delta_t_s,
+        config.max_steps,
+        config.relay_motion_limits,
+        config.high_motion_limits,
+        config.low_motion_limits,
+        config.flight_bounds,
+        config.hard_safety_distance_m,
+        config.soft_safety_distance_m,
+        config.hard_max_link_distance_m,
+        config.rate_reference_bps,
+        config.channel,
+    )
+    env = MultiRelayEnvironment(config)
+    _, info = env.reset(seed=0)
+    assert info["positions_m"].shape == (num_relays + 2, 3)
+    assert np.all(info["positions_m"] >= config.flight_bounds.minimum_m)
+    assert np.all(info["positions_m"] <= config.flight_bounds.maximum_m)
+    positions = info["positions_m"]
+    pairwise = np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=2)
+    pairwise[np.diag_indices_from(pairwise)] = np.inf
+    assert np.min(pairwise) >= config.hard_safety_distance_m
+    assert np.all(np.linalg.norm(np.diff(positions, axis=0), axis=1) <= config.hard_max_link_distance_m)
+
+
+def test_small_custom_bounds_are_supported_when_chain_is_feasible() -> None:
+    base = default_environment_config()
+    config = EnvironmentConfig(
+        1,
+        base.delta_t_s,
+        base.max_steps,
+        base.relay_motion_limits,
+        base.high_motion_limits,
+        base.low_motion_limits,
+        FlightBounds(np.array([-20.0, -20.0, -20.0]), np.array([20.0, 20.0, 20.0])),
+        5.0,
+        8.0,
+        30.0,
+        base.rate_reference_bps,
+        base.channel,
+    )
+    env = MultiRelayEnvironment(config)
+    _, info = env.reset(seed=4)
+    assert np.all(info["positions_m"] >= config.flight_bounds.minimum_m)
+    assert np.all(info["positions_m"] <= config.flight_bounds.maximum_m)
+
+
+def test_impossible_initial_chain_has_clear_value_error() -> None:
+    base = default_environment_config()
+    config = EnvironmentConfig(
+        8,
+        base.delta_t_s,
+        base.max_steps,
+        base.relay_motion_limits,
+        base.high_motion_limits,
+        base.low_motion_limits,
+        FlightBounds(np.zeros(3), np.ones(3)),
+        2.0,
+        3.0,
+        2.0,
+        base.rate_reference_bps,
+        base.channel,
+    )
+    with pytest.raises(ValueError, match="unable to construct"):
+        MultiRelayEnvironment(config).reset(seed=0)
 
 
 def test_reset_is_seed_deterministic_and_observations_have_required_shapes() -> None:
@@ -147,6 +267,8 @@ def test_step_updates_every_uav_once_and_reports_communication() -> None:
     assert np.isfinite(reward)
     expected_positions = old_positions + info["velocities_mps"] * env.config.delta_t_s
     assert np.allclose(info["positions_m"], expected_positions)
+    assert np.linalg.norm(info["positions_m"][0] - old_positions[0]) > 0.0
+    assert np.linalg.norm(info["positions_m"][-1] - old_positions[-1]) > 0.0
     assert np.allclose(
         info["requested_relay_velocities_mps"], actions * env.config.relay_motion_limits.max_horizontal_speed_mps
     )

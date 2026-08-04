@@ -48,17 +48,20 @@ class WaypointFollower:
         self._advance_reached_waypoints(state.position_m)
         displacement = self._waypoints_m[self._index] - state.position_m
         requested = np.zeros(3, dtype=float)
-        horizontal_distance = float(np.linalg.norm(displacement[:2]))
-        if horizontal_distance > self._arrival_tolerance_m:
-            requested[:2] = (
-                displacement[:2] / horizontal_distance * limits.max_horizontal_speed_mps
-            )
-        if abs(displacement[2]) > self._arrival_tolerance_m:
-            requested[2] = (
-                limits.max_climb_speed_mps
-                if displacement[2] > 0
-                else -limits.max_descent_speed_mps
-            )
+        if float(np.linalg.norm(displacement)) > self._arrival_tolerance_m:
+            horizontal_distance = float(np.linalg.norm(displacement[:2]))
+            if horizontal_distance > 0.0:
+                requested[:2] = (
+                    displacement[:2]
+                    / horizontal_distance
+                    * limits.max_horizontal_speed_mps
+                )
+            if displacement[2] != 0.0:
+                requested[2] = (
+                    limits.max_climb_speed_mps
+                    if displacement[2] > 0
+                    else -limits.max_descent_speed_mps
+                )
         return make_velocity_feasible(requested, state.velocity_mps, limits, delta_t_s)
 
     def _advance_reached_waypoints(self, position_m: np.ndarray) -> None:

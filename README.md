@@ -16,6 +16,8 @@ The logical topology is `H -> R1 -> ... -> RK -> L`.
 - Endpoint waypoint followers, relay safety filtering, observations, rewards, and an equal-spacing baseline.
 
 The environment accepts relay actions with shape `(K, 3)` in `[-1, 1]`.
+H/L waypoint paths are generated reproducibly from `reset(seed=...)`, and the
+configuration must admit a hard-feasible initial chain for its chosen `K`.
 
 ```python
 import numpy as np

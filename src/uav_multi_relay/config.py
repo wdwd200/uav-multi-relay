@@ -111,6 +111,10 @@ class EnvironmentConfig:
             object.__setattr__(self, name, _positive_finite(getattr(self, name), name))
         if self.soft_safety_distance_m < self.hard_safety_distance_m:
             raise ValueError("soft_safety_distance_m must be at least hard_safety_distance_m")
+        if self.hard_max_link_distance_m < self.hard_safety_distance_m:
+            raise ValueError(
+                "hard_max_link_distance_m must be at least hard_safety_distance_m"
+            )
         if not all(
             isinstance(value, MotionLimits)
             for value in (

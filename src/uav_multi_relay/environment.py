@@ -34,24 +34,10 @@ class MultiRelayEnvironment:
         if not isinstance(self.config, EnvironmentConfig):
             raise ValueError("config must be an EnvironmentConfig instance")
         self._high_follower = WaypointFollower(
-            np.array(
-                [
-                    [-300.0, 0.0, 150.0],
-                    [-300.0, 80.0, 160.0],
-                    [-260.0, 80.0, 150.0],
-                    [-260.0, 0.0, 150.0],
-                ]
-            )
+            np.zeros((1, 3))
         )
         self._low_follower = WaypointFollower(
-            np.array(
-                [
-                    [300.0, 0.0, 150.0],
-                    [300.0, -80.0, 140.0],
-                    [260.0, -80.0, 150.0],
-                    [260.0, 0.0, 150.0],
-                ]
-            )
+            np.zeros((1, 3))
         )
         self._states: tuple[UAVState, ...] = ()
         self._last_applied_relay_velocities = np.zeros((self.config.num_relays, 3))
@@ -91,11 +77,9 @@ class MultiRelayEnvironment:
         self._rng = np.random.default_rng(seed)
         self._high_follower.reset()
         self._low_follower.reset()
-        high_position = np.array([-300.0, 0.0, 150.0])
-        low_position = np.array([300.0, 0.0, 150.0])
-        relay_positions = np.linspace(
-            high_position, low_position, self.config.num_relays + 2
-        )[1:-1]
+        high_position, relay_positions, low_position = self._sample_initial_chain()
+        self._high_follower = WaypointFollower(self._make_endpoint_waypoints(high_position))
+        self._low_follower = WaypointFollower(self._make_endpoint_waypoints(low_position))
         self._states = (
             UAVState("H", high_position, np.zeros(3)),
             *tuple(
@@ -147,6 +131,19 @@ class MultiRelayEnvironment:
         high_next = advance_state(old_states[0], high_velocity, self.config.delta_t_s)
         low_next = advance_state(old_states[-1], low_velocity, self.config.delta_t_s)
 
+        if not self.config.flight_bounds.contains(high_next.position_m):
+            return self._terminate_for_candidate(
+                old_states,
+                requested,
+                "high endpoint waypoint candidate is outside flight bounds",
+            )
+        if not self.config.flight_bounds.contains(low_next.position_m):
+            return self._terminate_for_candidate(
+                old_states,
+                requested,
+                "low endpoint waypoint candidate is outside flight bounds",
+            )
+
         try:
             filtered = filter_relay_velocities(
                 old_states[1:-1],
@@ -160,23 +157,7 @@ class MultiRelayEnvironment:
                 low_next.position_m,
             )
         except NoFeasibleActionError as error:
-            self._terminated = True
-            communication = self._communication(old_states, old_states)
-            applied = np.stack([state.velocity_mps for state in old_states[1:-1]])
-            interventions = np.linalg.norm(requested - applied, axis=1)
-            reward_terms = self._zero_reward_terms()
-            reward_terms["failure_penalty"] = 1.0
-            info = self._info(
-                old_states,
-                requested,
-                applied,
-                interventions,
-                0.0,
-                communication,
-                reward_terms,
-            )
-            info["failure_reason"] = str(error)
-            return self._observation(communication["capacities_bps"]), -1.0, True, False, info
+            return self._terminate_for_candidate(old_states, requested, str(error))
 
         relay_next = tuple(
             advance_state(state, velocity, self.config.delta_t_s)
@@ -213,6 +194,82 @@ class MultiRelayEnvironment:
         if np.any(array < -1.0) or np.any(array > 1.0):
             raise ValueError("actions must be within [-1, 1]")
         return array.copy()
+
+    def _sample_initial_chain(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Sample endpoint anchors until a complete hard-feasible chain exists."""
+        bounds = self.config.flight_bounds
+        span = bounds.maximum_m - bounds.minimum_m
+        path_radius = min(
+            0.25 * self.config.hard_safety_distance_m,
+            0.03 * float(np.min(span)),
+        )
+        boundary_margin = min(
+            0.15 * float(np.min(span)),
+            max(self.config.hard_safety_distance_m, path_radius),
+        )
+        lower = bounds.minimum_m + boundary_margin
+        upper = bounds.maximum_m - boundary_margin
+        if np.any(lower >= upper):
+            lower = bounds.minimum_m.copy()
+            upper = bounds.maximum_m.copy()
+
+        for _ in range(2048):
+            high = self._rng.uniform(lower, upper)
+            low = self._rng.uniform(lower, upper)
+            relay_positions = np.linspace(high, low, self.config.num_relays + 2)[1:-1]
+            positions = np.vstack((high, relay_positions, low))
+            if not all(bounds.contains(position) for position in positions):
+                continue
+            pairwise = positions[:, np.newaxis, :] - positions[np.newaxis, :, :]
+            distances = np.linalg.norm(pairwise, axis=2)
+            np.fill_diagonal(distances, np.inf)
+            if float(np.min(distances)) < self.config.hard_safety_distance_m:
+                continue
+            adjacent = np.linalg.norm(np.diff(positions, axis=0), axis=1)
+            if np.any(adjacent > self.config.hard_max_link_distance_m):
+                continue
+            return high, relay_positions, low
+        raise ValueError(
+            "unable to construct a hard-feasible initial relay chain for the configured bounds"
+        )
+
+    def _make_endpoint_waypoints(self, anchor: np.ndarray) -> np.ndarray:
+        """Create a seed-controlled, bounded cyclic path near an endpoint anchor."""
+        bounds = self.config.flight_bounds
+        span = bounds.maximum_m - bounds.minimum_m
+        radius = min(
+            0.25 * self.config.hard_safety_distance_m,
+            0.03 * float(np.min(span)),
+        )
+        waypoints = [anchor.copy()]
+        for _ in range(3):
+            offset = self._rng.uniform(-radius, radius, size=3)
+            waypoints.append(np.clip(anchor + offset, bounds.minimum_m, bounds.maximum_m))
+        return np.asarray(waypoints, dtype=float)
+
+    def _terminate_for_candidate(
+        self,
+        old_states: tuple[UAVState, ...],
+        requested: np.ndarray,
+        reason: str,
+    ) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, object]]:
+        self._terminated = True
+        communication = self._communication(old_states, old_states)
+        applied = np.stack([state.velocity_mps for state in old_states[1:-1]])
+        interventions = np.linalg.norm(requested - applied, axis=1)
+        reward_terms = self._zero_reward_terms()
+        reward_terms["failure_penalty"] = 1.0
+        info = self._info(
+            old_states,
+            requested,
+            applied,
+            interventions,
+            0.0,
+            communication,
+            reward_terms,
+        )
+        info["failure_reason"] = reason
+        return self._observation(communication["capacities_bps"]), -1.0, True, False, info
 
     def _communication(
         self,
