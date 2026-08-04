@@ -14,6 +14,7 @@ The logical topology is `H -> R1 -> ... -> RK -> L`.
 - Equal-time and analytical optimal TDMA.
 - A synchronous, dependency-free multi-relay dynamic environment.
 - Endpoint waypoint followers, relay safety filtering, observations, rewards, and an equal-spacing baseline.
+- Stationary, equal-spacing, weighted-spacing, and greedy one-step coordinate-search baselines.
 
 The environment accepts relay actions with shape `(K, 3)` in `[-1, 1]`.
 H/L waypoint paths are generated reproducibly from `reset(seed=...)`, and the
@@ -35,6 +36,7 @@ observation, reward, terminated, truncated, info = env.step(
 ```
 
 Multi-agent reinforcement learning remains intentionally unimplemented.
+Model-predictive control is also not implemented.
 
 ## Installation
 

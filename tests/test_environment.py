@@ -1,7 +1,12 @@
 import numpy as np
 import pytest
 
-from uav_multi_relay.baselines import equal_spacing_actions
+from uav_multi_relay.baselines import (
+    equal_spacing_actions,
+    greedy_one_step_actions,
+    stationary_actions,
+    weighted_spacing_actions,
+)
 from uav_multi_relay.config import (
     ChannelConfig,
     EndpointTrajectoryConfig,
@@ -379,6 +384,62 @@ def test_equal_spacing_baseline_returns_bounded_actions() -> None:
     assert actions.shape == (4, 3)
     assert np.all(np.isfinite(actions))
     assert np.all(actions >= -1.0) and np.all(actions <= 1.0)
+
+
+@pytest.mark.parametrize(
+    "baseline",
+    [stationary_actions, equal_spacing_actions, weighted_spacing_actions, greedy_one_step_actions],
+)
+def test_all_baselines_return_valid_actions(baseline: object) -> None:
+    env = MultiRelayEnvironment()
+    env.reset(seed=0)
+    actions = baseline(env)
+    assert actions.shape == (4, 3)
+    assert np.all(np.isfinite(actions))
+    assert np.all(actions >= -1.0) and np.all(actions <= 1.0)
+
+
+def test_unit_weighted_spacing_matches_equal_spacing() -> None:
+    env = MultiRelayEnvironment()
+    env.reset(seed=0)
+    assert np.allclose(weighted_spacing_actions(env), equal_spacing_actions(env))
+
+
+@pytest.mark.parametrize("weights", [[1.0, 2.0], [1.0, 0.0, 1.0, 1.0, 1.0], [1.0, np.nan, 1.0, 1.0, 1.0]])
+def test_weighted_spacing_rejects_invalid_weights(weights: object) -> None:
+    env = MultiRelayEnvironment()
+    env.reset(seed=0)
+    with pytest.raises(ValueError):
+        weighted_spacing_actions(env, weights)
+
+
+def test_greedy_baseline_does_not_mutate_environment_and_is_not_worse() -> None:
+    env = MultiRelayEnvironment()
+    _, reset_info = env.reset(seed=0)
+    old_positions = reset_info["positions_m"].copy()
+    old_step = env.step_index
+    stationary_rate = env.step(stationary_actions(env))[4]["rate_e2e_bps"]
+    env.reset(seed=0)
+    equal_rate = env.step(equal_spacing_actions(env))[4]["rate_e2e_bps"]
+    env.reset(seed=0)
+    actions = greedy_one_step_actions(env, sweeps=2)
+    assert env.step_index == old_step
+    assert np.allclose(env.states[0].position_m, old_positions[0])
+    _, _, terminated, _, info = env.step(actions)
+    assert not terminated
+    assert info["rate_e2e_bps"] >= min(stationary_rate, equal_rate)
+
+
+def test_baselines_run_for_50_steps_without_nan_or_unhandled_errors() -> None:
+    for baseline in (stationary_actions, equal_spacing_actions, weighted_spacing_actions):
+        env = MultiRelayEnvironment()
+        env.reset(seed=0)
+        for _ in range(50):
+            _, _, terminated, truncated, info = env.step(baseline(env))
+            assert not terminated
+            assert np.all(np.isfinite(info["positions_m"]))
+            if truncated:
+                env.reset(seed=0)
 
 
 def test_random_actions_run_for_500_steps_without_nan_or_unhandled_failure() -> None:
