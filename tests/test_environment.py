@@ -1,3 +1,5 @@
+import copy
+
 import numpy as np
 import pytest
 
@@ -415,31 +417,52 @@ def test_weighted_spacing_rejects_invalid_weights(weights: object) -> None:
 
 def test_greedy_baseline_does_not_mutate_environment_and_is_not_worse() -> None:
     env = MultiRelayEnvironment()
-    _, reset_info = env.reset(seed=0)
-    old_positions = reset_info["positions_m"].copy()
-    old_step = env.step_index
-    stationary_rate = env.step(stationary_actions(env))[4]["rate_e2e_bps"]
     env.reset(seed=0)
-    equal_rate = env.step(equal_spacing_actions(env))[4]["rate_e2e_bps"]
-    env.reset(seed=0)
+    stationary_env = copy.deepcopy(env)
+    stationary_rate = stationary_env.step(stationary_actions(stationary_env))[4]["rate_e2e_bps"]
+    equal_env = copy.deepcopy(env)
+    equal_rate = equal_env.step(equal_spacing_actions(equal_env))[4]["rate_e2e_bps"]
+    positions_before = np.stack([state.position_m for state in env.states]).copy()
+    velocities_before = np.stack([state.velocity_mps for state in env.states]).copy()
+    step_before = env.step_index
+    previous_applied_before = env._last_applied_relay_velocities.copy()
     actions = greedy_one_step_actions(env, sweeps=2)
-    assert env.step_index == old_step
-    assert np.allclose(env.states[0].position_m, old_positions[0])
+    positions_after = np.stack([state.position_m for state in env.states])
+    velocities_after = np.stack([state.velocity_mps for state in env.states])
+    assert np.array_equal(positions_after, positions_before)
+    assert np.array_equal(velocities_after, velocities_before)
+    assert env.step_index == step_before
+    assert np.array_equal(env._last_applied_relay_velocities, previous_applied_before)
     _, _, terminated, _, info = env.step(actions)
     assert not terminated
-    assert info["rate_e2e_bps"] >= min(stationary_rate, equal_rate)
+    expected_minimum = max(stationary_rate, equal_rate)
+    assert info["rate_e2e_bps"] + 1e-9 >= expected_minimum
 
 
 def test_baselines_run_for_50_steps_without_nan_or_unhandled_errors() -> None:
-    for baseline in (stationary_actions, equal_spacing_actions, weighted_spacing_actions):
+    for baseline in (
+        stationary_actions,
+        equal_spacing_actions,
+        weighted_spacing_actions,
+        greedy_one_step_actions,
+    ):
         env = MultiRelayEnvironment()
         env.reset(seed=0)
-        for _ in range(50):
-            _, _, terminated, truncated, info = env.step(baseline(env))
-            assert not terminated
+        for attempt in range(50):
+            actions = baseline(env)
+            assert actions.shape == (env.config.num_relays, 3)
+            assert np.all(np.isfinite(actions))
+            assert np.all(actions >= -1.0) and np.all(actions <= 1.0)
+            _, _, terminated, truncated, info = env.step(actions)
             assert np.all(np.isfinite(info["positions_m"]))
+            assert np.all(np.isfinite(info["velocities_mps"]))
+            assert np.all(np.isfinite(info["hop_capacities_bps"]))
+            assert np.isfinite(info["rate_e2e_bps"])
+            assert info["rate_e2e_bps"] >= 0.0
             if truncated:
-                env.reset(seed=0)
+                env.reset(seed=attempt + 1)
+            elif terminated:
+                env.reset(seed=attempt + 1)
 
 
 def test_random_actions_run_for_500_steps_without_nan_or_unhandled_failure() -> None:
