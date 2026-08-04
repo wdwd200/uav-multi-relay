@@ -38,6 +38,10 @@ observation, reward, terminated, truncated, info = env.step(
 Multi-agent reinforcement learning remains intentionally unimplemented.
 Model-predictive control is also not implemented.
 
+Shared Gaussian Actor and centralized twin-Q Critic network building blocks are
+implemented for the learning foundation. MASAC updates, replay buffers, target
+critics, entropy tuning, and training loops are not implemented.
+
 ## Installation
 
 ```bash
