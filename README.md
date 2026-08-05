@@ -17,6 +17,7 @@ The logical topology is `H -> R1 -> ... -> RK -> L`.
 - Stationary, equal-spacing, weighted-spacing, and greedy one-step coordinate-search baselines.
 - Requested actions and safety-filtered executed normalized actions in environment info.
 - Fixed-capacity multi-agent replay storage with deterministic sampling.
+- Parameter-sharing MASAC one-batch update core with target critics and entropy temperature.
 
 The environment accepts relay actions with shape `(K, 3)` in `[-1, 1]`.
 H/L waypoint paths are generated reproducibly from `reset(seed=...)`, and the
@@ -43,8 +44,10 @@ Model-predictive control is also not implemented.
 Shared Gaussian Actor and centralized twin-Q Critic network building blocks are
 implemented for the learning foundation. The replay buffer stores the
 safety-filtered normalized action that was actually executed, and keeps
-termination separate from time-limit truncation. MASAC updates, target critics,
-entropy tuning, and training loops are not implemented.
+termination separate from time-limit truncation. Parameter-sharing MASAC now
+implements action selection, critic targets, one-batch actor/critic/alpha updates,
+and Polyak target updates. Environment collection loops, checkpoints, and full
+training experiments are not implemented.
 
 ## Installation
 

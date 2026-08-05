@@ -7,7 +7,9 @@ import torch
 from uav_multi_relay import MultiRelayEnvironment
 from uav_multi_relay.learning import (
     CentralizedTwinCritic,
+    MASACUpdateMetrics,
     MultiAgentReplayBuffer,
+    ParameterSharingMASAC,
     ReplayBatch,
     SharedGaussianActor,
 )
@@ -257,3 +259,126 @@ def test_environment_applied_actions_create_a_real_replay_transition() -> None:
     assert torch.allclose(batch.applied_actions[0], torch.as_tensor(info["applied_relay_actions"], dtype=torch.float32))
     assert batch.terminated.item() == float(terminated)
     assert batch.truncated.item() == float(truncated)
+
+
+def _masac_batch(
+    *,
+    batch_size: int = 3,
+    num_relays: int = 2,
+    local_dim: int = 4,
+    global_dim: int = 5,
+    terminated: object = 0.0,
+    truncated: object = 0.0,
+) -> ReplayBatch:
+    terminated_tensor = torch.as_tensor(terminated, dtype=torch.float32)
+    truncated_tensor = torch.as_tensor(truncated, dtype=torch.float32)
+    if terminated_tensor.numel() == 1:
+        terminated_tensor = terminated_tensor.expand(batch_size, 1).clone()
+    if truncated_tensor.numel() == 1:
+        truncated_tensor = truncated_tensor.expand(batch_size, 1).clone()
+    return ReplayBatch(
+        local_observations=torch.randn(batch_size, num_relays, local_dim),
+        global_states=torch.randn(batch_size, global_dim),
+        applied_actions=torch.tanh(torch.randn(batch_size, num_relays, 3)),
+        rewards=torch.randn(batch_size, 1),
+        next_local_observations=torch.randn(batch_size, num_relays, local_dim),
+        next_global_states=torch.randn(batch_size, global_dim),
+        terminated=terminated_tensor,
+        truncated=truncated_tensor,
+    )
+
+
+def _small_masac(num_relays: int = 2) -> ParameterSharingMASAC:
+    return ParameterSharingMASAC(
+        local_observation_dim=4,
+        global_state_dim=5,
+        num_relays=num_relays,
+        hidden_dims=(16, 16),
+        device="cpu",
+    )
+
+
+def test_masac_act_is_bounded_float32_and_deterministic_when_requested() -> None:
+    masac = _small_masac(num_relays=2)
+    observations = np.zeros((2, 4), dtype=np.float32)
+    first = masac.act(observations, deterministic=True)
+    second = masac.act(observations, deterministic=True)
+    assert first.shape == (2, 3)
+    assert first.dtype == np.float32
+    assert np.all(np.isfinite(first))
+    assert np.all(first >= -1.0) and np.all(first <= 1.0)
+    assert np.array_equal(first, second)
+    with pytest.raises(ValueError):
+        masac.act(np.zeros((4, 4), dtype=np.float32))
+
+
+def test_masac_target_critic_is_independent_frozen_and_uses_polyak_updates() -> None:
+    masac = _small_masac()
+    online_parameters = list(masac.critic.parameters())
+    target_parameters = list(masac.target_critic.parameters())
+    assert all(not parameter.requires_grad for parameter in target_parameters)
+    assert {id(parameter) for parameter in online_parameters}.isdisjoint(
+        id(parameter) for parameter in target_parameters
+    )
+    assert all(torch.equal(online, target) for online, target in zip(online_parameters, target_parameters))
+    batch = _masac_batch()
+    before_target = [parameter.detach().clone() for parameter in target_parameters]
+    masac.update(batch)
+    assert any(not torch.equal(before, after) for before, after in zip(before_target, target_parameters))
+
+
+def test_masac_joint_log_probability_sums_relay_terms() -> None:
+    values = torch.tensor([[[1.0], [2.0]], [[-1.0], [0.5]]])
+    result = ParameterSharingMASAC._joint_log_probability(values)
+    assert result.shape == (2, 1)
+    assert torch.equal(result, torch.tensor([[3.0], [-0.5]]))
+
+
+def test_masac_critic_target_masks_terminated_but_bootstraps_truncated() -> None:
+    masac = _small_masac()
+    for parameter in masac.target_critic.parameters():
+        parameter.data.zero_()
+    batch = _masac_batch(
+        batch_size=2,
+        terminated=torch.tensor([[1.0], [0.0]]),
+        truncated=torch.tensor([[0.0], [1.0]]),
+    )
+    target = masac.compute_critic_target(batch)
+    assert target.shape == (2, 1)
+    assert torch.isfinite(target).all()
+    assert target[0].item() == pytest.approx(batch.rewards[0].item())
+    assert target[1].item() != pytest.approx(batch.rewards[1].item())
+
+
+@pytest.mark.parametrize("num_relays", [1, 8])
+def test_masac_update_supports_dynamic_relay_counts_and_returns_finite_metrics(
+    num_relays: int,
+) -> None:
+    masac = _small_masac(num_relays=num_relays)
+    batch = _masac_batch(num_relays=num_relays)
+    actor_before = [parameter.detach().clone() for parameter in masac.actor.parameters()]
+    critic_before = [parameter.detach().clone() for parameter in masac.critic.parameters()]
+    metrics = masac.update(batch)
+    assert isinstance(metrics, MASACUpdateMetrics)
+    assert all(np.isfinite(value) for value in vars(metrics).values())
+    assert masac.alpha.item() > 0.0 and np.isfinite(masac.alpha.item())
+    assert any(not torch.equal(before, after) for before, after in zip(actor_before, masac.actor.parameters()))
+    assert any(not torch.equal(before, after) for before, after in zip(critic_before, masac.critic.parameters()))
+    assert all(parameter.grad is None for parameter in masac.critic.parameters())
+
+
+def test_masac_rejects_incompatible_batch_shapes() -> None:
+    masac = _small_masac()
+    batch = _masac_batch()
+    invalid = ReplayBatch(
+        local_observations=batch.local_observations[:, :1],
+        global_states=batch.global_states,
+        applied_actions=batch.applied_actions,
+        rewards=batch.rewards,
+        next_local_observations=batch.next_local_observations,
+        next_global_states=batch.next_global_states,
+        terminated=batch.terminated,
+        truncated=batch.truncated,
+    )
+    with pytest.raises(ValueError):
+        masac.update(invalid)
