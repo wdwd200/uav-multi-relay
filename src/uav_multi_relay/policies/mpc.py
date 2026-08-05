@@ -80,7 +80,12 @@ def _validate_discount(discount: object) -> float:
 
 
 def _validate_sequence(env: MultiRelayEnvironment, action_sequence: object) -> np.ndarray:
-    array = np.asarray(action_sequence, dtype=float)
+    try:
+        array = np.asarray(action_sequence, dtype=float)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"action_sequence must be numeric with shape (horizon, {env.config.num_relays}, 3)"
+        ) from error
     expected_rank = (env.config.num_relays, 3)
     if array.ndim != 3 or array.shape[1:] != expected_rank:
         raise ValueError(
@@ -142,9 +147,9 @@ def plan_mpc(
     mean_sequence = np.repeat(equal_action[np.newaxis, :, :], config.horizon, axis=0)
     standard_deviation = np.full_like(mean_sequence, config.initial_standard_deviation)
     elite_count = max(1, int(np.ceil(config.population_size * config.elite_fraction)))
-    final_candidates = None
-    final_scores = None
-    final_evaluations = None
+    best_sequence = None
+    best_score = -np.inf
+    best_evaluation = None
     for _ in range(config.iterations):
         candidates = rng.normal(mean_sequence, standard_deviation, size=(config.population_size, *mean_sequence.shape))
         candidates = np.clip(candidates, -1.0, 1.0)
@@ -153,14 +158,18 @@ def plan_mpc(
         candidates[2] = np.repeat(equal_action[np.newaxis, :, :], config.horizon, axis=0)
         evaluations = [evaluate_action_sequence(env, candidate, config.discount) for candidate in candidates]
         scores = np.asarray([evaluation.discounted_return for evaluation in evaluations])
+        iteration_best = int(np.argmax(scores))
+        if best_sequence is None or scores[iteration_best] > best_score:
+            best_sequence = candidates[iteration_best].copy()
+            best_score = float(scores[iteration_best])
+            best_evaluation = evaluations[iteration_best]
         order = np.argsort(-scores, kind="stable")
         elites = candidates[order[:elite_count]]
         mean_sequence = np.clip(elites.mean(axis=0), -1.0, 1.0)
         standard_deviation = np.maximum(elites.std(axis=0), config.minimum_standard_deviation)
-        final_candidates, final_scores, final_evaluations = candidates, scores, evaluations
-    best_index = int(np.argmax(final_scores))
-    best_sequence = np.asarray(final_candidates[best_index], dtype=float).copy()
-    best_evaluation = final_evaluations[best_index]
+    if best_sequence is None or best_evaluation is None:
+        raise RuntimeError("MPC did not evaluate any candidate sequence")
+    best_sequence = np.asarray(best_sequence, dtype=float).copy()
     return MPCPlan(
         first_action=best_sequence[0].copy(),
         action_sequence=best_sequence.copy(),

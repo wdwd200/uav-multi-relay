@@ -39,15 +39,15 @@ observation, reward, terminated, truncated, info = env.step(
 )
 ```
 
-Multi-agent reinforcement learning remains intentionally unimplemented.
+The learning foundation is implemented; complete training, evaluation,
+checkpoint, and experiment workflows remain unfinished.
 
 Shared Gaussian Actor and centralized twin-Q Critic network building blocks are
 implemented for the learning foundation. The replay buffer stores the
 safety-filtered normalized action that was actually executed, and keeps
 termination separate from time-limit truncation. Parameter-sharing MASAC now
 implements action selection, critic targets, one-batch actor/critic/alpha updates,
-and Polyak target updates. Environment collection loops, checkpoints, and full
-training experiments are not implemented.
+and Polyak target updates.
 
 The MPC planner predicts on a deep copy of the environment and optimizes the
 discounted full team reward. It executes only the first action of the selected
