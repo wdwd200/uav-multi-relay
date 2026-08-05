@@ -1,133 +1,319 @@
-# Codex 修复计划：阶段 3F 周期调度修复
+# Codex 执行计划：阶段 3G——统一基线评估与 MASAC 初步性能验证
 
 ## 1. 目标
 
-修复训练日志与周期评估的调度耦合。
+完成统一的策略比较工具，在相同环境配置和相同 episode seed 下比较：
 
-必须保证：
+```text
+MASAC
+随机动作
+静止中继
+动态等距链
+单步贪心
+有限时域 MPC
+```
 
-- 训练日志在 `log_interval_steps` 的整数倍和最终步产生；
-- 评估在 `evaluation_interval_steps` 的整数倍和最终步产生；
-- 两个间隔可以任意设置，不要求存在整倍数关系；
-- 同一步同时满足两个条件时，只执行一次回调，但分别完成日志和评估。
+随后进行一次开发级 MASAC 训练和基础基线比较。
 
-本次不进入阶段 3G。
+本次结果只用于确认训练与比较流程有效，不作为论文正式多随机种子结果。
 
-开始后使用本计划覆盖 `AGENTS.md`。
+开始后使用本计划覆盖根目录 `AGENTS.md`。
 
-## 2. 修改范围
+------
+
+## 2. 文件范围
+
+新增：
+
+```text
+src/uav_multi_relay/analysis/__init__.py
+src/uav_multi_relay/analysis/comparison.py
+scripts/compare_baselines.py
+tests/test_comparison.py
+```
 
 允许修改：
 
 ```text
-src/uav_multi_relay/training/experiment.py
-tests/test_experiment.py
+scripts/run_experiment.py
 README.md
 AGENTS.md
 aaa.md
 ```
 
-如确有必要，可小范围修改：
+不得修改环境、通信、安全过滤、奖励、Replay Buffer、MASAC 更新公式或现有基线算法。
 
-```text
-src/uav_multi_relay/training/trainer.py
-tests/test_training.py
-```
+不得增加新依赖。
 
-不得修改环境、MASAC、Replay Buffer、Checkpoint 或评估指标公式。
+------
 
-## 3. 调度修复
+## 3. 统一比较接口
 
-推荐在 `run_masac_experiment()` 中使用：
+在 `analysis/comparison.py` 中实现：
 
 ```python
-math.gcd(
-    experiment_config.log_interval_steps,
-    experiment_config.evaluation_interval_steps,
-)
+@dataclass(frozen=True)
+class PolicyComparisonConfig:
+    episodes: int = 5
+    seed: int = 20_000
+    policies: tuple[str, ...] = (
+        "masac",
+        "random",
+        "stationary",
+        "equal_spacing",
+        "greedy",
+        "mpc",
+    )
+    greedy_sweeps: int = 1
+    mpc_config: MPCConfig = MPCConfig(
+        horizon=2,
+        population_size=8,
+        iterations=2,
+        elite_fraction=0.5,
+    )
 ```
 
-作为底层训练进度回调间隔。
+合法策略名称仅限：
 
-回调内部必须分别判断：
+```text
+masac
+random
+stationary
+equal_spacing
+greedy
+mpc
+```
+
+策略名称不得重复。
+
+实现单 episode 结果、单策略汇总和总比较结果数据类，至少统计：
+
+```text
+episode return
+episode length
+平均端到端速率
+最低端到端速率
+安全过滤介入率
+terminated
+truncated
+每步平均动作计算时间
+```
+
+单策略汇总至少包含：
+
+```text
+平均 return 与标准差
+平均端到端速率
+全部 episode 的最低速率
+平均安全干预率
+平均 episode 长度
+terminated episode 比例
+平均动作计算时间
+```
+
+实现：
 
 ```python
-should_log = (
-    environment_steps % log_interval_steps == 0
-    or environment_steps == total_environment_steps
-)
-
-should_evaluate = (
-    environment_steps % evaluation_interval_steps == 0
-    or environment_steps == total_environment_steps
-)
+def compare_policies(
+    env: MultiRelayEnvironment,
+    agent: ParameterSharingMASAC,
+    config: PolicyComparisonConfig,
+) -> PolicyComparisonResult:
 ```
 
-只有 `should_log` 为真时写入：
+------
+
+## 4. 比较规则
+
+### 4.1 公平性
+
+每种策略的第 `episode_index` 个 episode 都必须使用：
+
+```python
+episode_seed = config.seed + episode_index
+```
+
+因此所有策略面对相同的 H/L 轨迹和初始状态。
+
+比较过程必须深拷贝传入环境，不得修改原环境。
+
+不得训练或修改 MASAC Agent。
+
+### 4.2 策略动作
+
+- `masac`：调用 `agent.act(local_observation, deterministic=True)`；
+- `random`：每个 episode 使用独立 `np.random.default_rng(episode_seed)`；
+- `stationary`：调用现有 `stationary_actions()`；
+- `equal_spacing`：调用现有 `equal_spacing_actions()`；
+- `greedy`：调用现有 `greedy_one_step_actions()`；
+- `mpc`：调用现有 `mpc_actions()`。
+
+MPC 每一步使用确定性 seed，例如：
+
+```python
+config.seed + episode_index * env.config.max_steps + step_index
+```
+
+不得写死中继数量。
+
+### 4.3 计算时间
+
+使用 `time.perf_counter()` 只测量动作生成时间，不包含：
 
 ```text
-training_metrics.jsonl
+env.step()
+日志写入
+结果汇总
 ```
 
-只有 `should_evaluate` 为真时执行评估并写入：
+动作计算时间必须非负且有限。
+
+------
+
+## 5. 比较脚本
+
+新增：
 
 ```text
-evaluation_metrics.jsonl
+scripts/compare_baselines.py
 ```
 
-最终步不得重复记录或重复评估。
-
-不允许通过强制要求两个间隔整除来规避问题。
-
-## 4. 测试
-
-新增明确测试：
+至少支持：
 
 ```text
-total steps = 5
-log interval = 3
-evaluation interval = 2
+--checkpoint
+--output-dir
+--episodes
+--seed
+--max-steps
+--policies
+--greedy-sweeps
+--mpc-horizon
+--mpc-population-size
+--mpc-iterations
+--device
 ```
 
-必须断言：
+流程：
+
+1. 加载 MASAC checkpoint；
+2. 根据 checkpoint 的中继数量创建环境；
+3. 使用 `--max-steps` 替换 episode 最大步数；
+4. 核对环境 observation 与 Agent 维度；
+5. 调用 `compare_policies()`；
+6. 输出以下文件：
 
 ```text
-training log steps == [3, 5]
-evaluation steps == [2, 4, 5]
+comparison_config.json
+comparison_episodes.jsonl
+comparison_summary.json
 ```
 
-再测试相反关系：
+输出目录必须不存在或为空，不得覆盖旧结果。
+
+所有 JSON 使用：
+
+```python
+allow_nan=False
+```
+
+终端最后输出简洁 JSON 摘要。
+
+------
+
+## 6. run_experiment.py
+
+增加可选参数：
 
 ```text
-total steps = 7
-log interval = 2
-evaluation interval = 3
+--max-steps
 ```
 
-必须断言：
+训练环境和周期评估环境必须使用相同的 `max_steps`。
 
-```text
-training log steps == [2, 4, 6, 7]
-evaluation steps == [3, 6, 7]
+默认值保持当前环境默认值，不改变现有命令行为。
+
+------
+
+## 7. 测试
+
+新增 `tests/test_comparison.py`，至少覆盖：
+
+1. 配置非法值和重复策略名称被拒绝；
+2. 各策略使用完全相同的 episode seed；
+3. 随机策略在相同 seed 下可复现；
+4. MASAC 始终使用确定性动作；
+5. 比较过程不修改传入环境；
+6. 比较过程不修改 Agent 参数和优化器状态；
+7. 所有统计值有限，动作计算时间非负；
+8. 支持策略子集；
+9. 支持 `K=1` 和 `K=4`；
+10. 输出 JSON/JSONL 可解析且不含 NaN；
+11. 输出目录非空时拒绝覆盖；
+12. 使用短 episode 和小型 MPC 配置完成真实冒烟比较。
+
+测试不得运行长 episode 或默认完整 MPC 配置。
+
+------
+
+## 8. 开发级训练与比较
+
+代码测试通过后，执行一次开发级训练：
+
+```bash
+python scripts/run_experiment.py \
+  --output-dir outputs/stage3g_seed0 \
+  --steps 5000 \
+  --max-steps 100 \
+  --batch-size 256 \
+  --random-action-steps 1000 \
+  --update-after-steps 1000 \
+  --updates-per-step 1 \
+  --log-interval 500 \
+  --evaluation-interval 1000 \
+  --evaluation-episodes 3 \
+  --seed 0 \
+  --evaluation-seed 10000 \
+  --device cpu
 ```
 
-同时保留并验证：
+然后比较最佳 checkpoint：
 
-- 最终步不重复；
-- 最佳 Checkpoint 元数据对应实际评估步；
-- 最终 Checkpoint 元数据对应总训练步数；
-- JSONL 步数严格递增；
-- 所有 JSON 数值有限。
+```bash
+python scripts/compare_baselines.py \
+  --checkpoint outputs/stage3g_seed0/best_checkpoint.pt \
+  --output-dir outputs/stage3g_seed0/comparison \
+  --episodes 3 \
+  --seed 20000 \
+  --max-steps 100 \
+  --policies masac random stationary equal_spacing greedy mpc \
+  --greedy-sweeps 1 \
+  --mpc-horizon 2 \
+  --mpc-population-size 8 \
+  --mpc-iterations 2 \
+  --device cpu
+```
 
-## 5. README
+要求：
 
-修正 `train.py` 的描述：
+- 结果全部有限；
+- 各策略完成相同的 episode 数量；
+- 如实记录 MASAC 是否超过随机和静止策略；
+- MASAC 未超过基线时不得修改、筛选或美化结果；
+- 不在本任务中进行奖励调参或算法调参。
 
-- 默认不写训练日志；
-- 提供 `--checkpoint-out` 时可以保存一个最终 checkpoint；
-- 完整日志、周期评估和最佳 checkpoint 由 `run_experiment.py` 负责。
+`outputs/` 不得提交到 Git。
 
-## 6. 验证
+------
+
+## 9. README、验证与 Git
+
+README 增加：
+
+- 统一策略比较命令；
+- 输出指标说明；
+- 同 seed 公平比较原则；
+- 本次单 seed 结果不属于论文正式结论。
 
 运行：
 
@@ -136,80 +322,58 @@ python -m pytest
 python -m compileall -q src tests scripts
 ```
 
-额外运行非整除间隔冒烟实验：
+提交代码：
 
 ```bash
-python scripts/run_experiment.py \
-  --output-dir interval_smoke \
-  --steps 7 \
-  --batch-size 4 \
-  --random-action-steps 4 \
-  --update-after-steps 4 \
-  --log-interval 2 \
-  --evaluation-interval 3 \
-  --evaluation-episodes 1 \
-  --seed 0 \
-  --evaluation-seed 100 \
-  --device cpu
-```
-
-检查：
-
-```text
-training_metrics.jsonl steps = [2, 4, 6, 7]
-evaluation_metrics.jsonl steps = [3, 6, 7]
-```
-
-完成后删除：
-
-```text
-interval_smoke/
-```
-
-## 7. Git 与 aaa.md
-
-提交代码并推送：
-
-```bash
-git add AGENTS.md README.md \
-  src/uav_multi_relay/training/experiment.py \
-  tests/test_experiment.py
-git commit -m "fix: decouple experiment log and evaluation schedules"
+git add AGENTS.md README.md scripts/run_experiment.py \
+  scripts/compare_baselines.py src/uav_multi_relay/analysis \
+  tests/test_comparison.py
+git commit -m "stage-3: add unified policy comparison"
 git push
 ```
 
-覆盖写入 `aaa.md`：
+随后覆盖写入 `aaa.md`：
 
 ```markdown
 # 本次执行结果
 
-- 阶段：3F（调度修复）
-- 任务：解耦训练日志与周期评估间隔
+- 阶段：3G
+- 任务：统一基线评估与 MASAC 初步性能验证
 - 完成状态：
-- 修改文件：
-- 调度实现：
-- 非整除间隔测试：
+- 修改和新增文件：
+- 比较策略：
+- 公平比较方式：
 - 完整测试结果：
 - 编译验证：
-- 冒烟实验结果：
+- 开发级训练结果：
+- 基线比较结果：
+- MASAC 是否超过随机策略：
+- MASAC 是否超过静止策略：
+- 平均安全干预率：
+- 各策略平均动作计算时间：
 - 代码 Commit ID：
 - 当前分支：
 - GitHub 推送结果：
 - Git 异常：
 - 计划偏差：
 - 遗留问题：
-- 下一建议阶段：3G——MASAC 正式训练与基础基线比较
+- 下一建议阶段：
 ```
 
-随后提交：
+下一建议阶段按真实结果填写：
+
+- MASAC 明显超过随机和静止：进入阶段 4A；
+- MASAC 未超过其中任一项：进入阶段 3H——训练稳定性诊断与调参。
+
+提交结果：
 
 ```bash
 git add aaa.md
-git commit -m "docs: record experiment schedule fix"
+git commit -m "docs: record MASAC baseline comparison result"
 git push
 git status --short
 ```
 
-若发生 `git.exe` 内存读取错误，立即停止 Git 操作并如实记录，不自动重试。
+若发生 `git.exe` 内存读取错误，立即停止 Git 操作，不自动重试，不执行 `git reset --hard`、`git gc` 或 `git prune`，并如实记录实际状态。
 
 最终工作区必须干净。

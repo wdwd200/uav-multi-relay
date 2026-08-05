@@ -115,5 +115,22 @@ python scripts/run_experiment.py --output-dir masac_experiment_smoke \
 Each run directory contains `run_config.json`, training and evaluation JSONL
 logs, `best_checkpoint.pt`, `final_checkpoint.pt`, and `summary.json`. Existing
 non-empty directories are rejected. Periodic evaluations reuse fixed seeds for
-longitudinal comparison. Batch multi-seed experiments and baseline comparisons
-are not implemented.
+longitudinal comparison. Batch multi-seed experiments are not implemented.
+
+## Policy Comparison
+
+Compare a saved MASAC checkpoint with the random, stationary, equal-spacing,
+greedy, and MPC baselines on the same seeded episodes:
+
+```bash
+python scripts/compare_baselines.py --checkpoint best_checkpoint.pt \
+  --output-dir comparison --episodes 3 --seed 20000 --max-steps 100 \
+  --policies masac random stationary equal_spacing greedy mpc \
+  --greedy-sweeps 1 --mpc-horizon 2 --mpc-population-size 8 \
+  --mpc-iterations 2
+```
+
+The output directory contains the resolved comparison configuration, one JSONL
+record per policy episode, and per-policy summary metrics. Every policy receives
+the same episode seeds. These single-seed development comparisons validate the
+workflow only; they are not formal multi-seed experimental conclusions.

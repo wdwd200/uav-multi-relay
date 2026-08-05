@@ -24,6 +24,7 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=10_000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-relays", type=int, default=4)
+    parser.add_argument("--max-steps", type=int)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--random-action-steps", type=int, default=1_000)
     parser.add_argument("--update-after-steps", type=int, default=1_000)
@@ -37,8 +38,13 @@ def main() -> None:
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     base = MultiRelayEnvironment()
-    training_env = MultiRelayEnvironment(replace(base.config, num_relays=args.num_relays))
-    evaluation_env = MultiRelayEnvironment(replace(base.config, num_relays=args.num_relays))
+    environment_config = replace(
+        base.config,
+        num_relays=args.num_relays,
+        **({"max_steps": args.max_steps} if args.max_steps is not None else {}),
+    )
+    training_env = MultiRelayEnvironment(environment_config)
+    evaluation_env = MultiRelayEnvironment(environment_config)
     observation, _ = training_env.reset(seed=args.seed)
     local_dim = int(observation["local"].shape[-1])
     global_dim = int(observation["global"].shape[-1])
