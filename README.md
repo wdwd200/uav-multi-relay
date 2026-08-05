@@ -40,8 +40,9 @@ observation, reward, terminated, truncated, info = env.step(
 ```
 
 The environment collection and parameter-sharing MASAC training loop are implemented.
-Checkpoints, an independent evaluator, multi-seed runs, and complete experiment
-workflows remain unfinished.
+MASAC checkpoints and a deterministic independent evaluator are also available.
+Replay Buffer and in-progress episode state are intentionally not included in
+checkpoints, so checkpoints do not claim exact mid-episode resume.
 
 Shared Gaussian Actor and centralized twin-Q Critic network building blocks are
 implemented for the learning foundation. The replay buffer stores the
@@ -84,3 +85,16 @@ python scripts/train.py --steps 30 --batch-size 4 --random-action-steps 4 \
 
 The script infers observation dimensions from the environment reset and prints a
 compact JSON summary. It does not write checkpoints or training logs.
+
+Save a model checkpoint and evaluate it:
+
+```bash
+python scripts/train.py --steps 20 --batch-size 4 --random-action-steps 4 \
+  --update-after-steps 4 --seed 0 --checkpoint-out masac_smoke.pt
+python scripts/evaluate.py --checkpoint masac_smoke.pt --episodes 2 --seed 100
+```
+
+The checkpoint contains the actor, critics, target critic, entropy temperature,
+optimizers, agent architecture/hyperparameters, and training counters. It does
+not contain the replay buffer, current environment episode, or a full environment
+configuration snapshot.

@@ -73,6 +73,8 @@ def train_masac(
     """Collect exactly the configured number of steps and perform updates."""
     if not isinstance(config, MASACTrainingConfig):
         raise ValueError("config must be a MASACTrainingConfig")
+    if replay_buffer.capacity != config.replay_capacity:
+        raise ValueError("replay_buffer.capacity must equal config.replay_capacity")
     observation, _ = env.reset(seed=config.seed)
     local, global_state = _observation_arrays(observation)
     num_relays, local_dim = local.shape

@@ -77,6 +77,14 @@ class ParameterSharingMASAC:
         self.global_state_dim = _positive_int(global_state_dim, "global_state_dim")
         self.num_relays = _positive_int(num_relays, "num_relays")
         self.action_dim = _positive_int(action_dim, "action_dim")
+        if (
+            isinstance(hidden_dims, (str, bytes))
+            or not isinstance(hidden_dims, tuple)
+            or not hidden_dims
+            or any(isinstance(value, bool) or not isinstance(value, (int, np.integer)) or int(value) <= 0 for value in hidden_dims)
+        ):
+            raise ValueError("hidden_dims must be a non-empty tuple of positive integers")
+        self.hidden_dims = tuple(int(value) for value in hidden_dims)
         self.gamma = _finite_probability(gamma, "gamma", allow_zero=True)
         self.tau = _finite_probability(tau, "tau", allow_zero=False)
         self.actor_learning_rate = _finite_positive(actor_learning_rate, "actor_learning_rate")
@@ -105,13 +113,13 @@ class ParameterSharingMASAC:
         self.actor = SharedGaussianActor(
             local_observation_dim=self.local_observation_dim,
             action_dim=self.action_dim,
-            hidden_dims=hidden_dims,
+            hidden_dims=self.hidden_dims,
         ).to(self.device)
         self.critic = CentralizedTwinCritic(
             global_state_dim=self.global_state_dim,
             num_relays=self.num_relays,
             action_dim=self.action_dim,
-            hidden_dims=hidden_dims,
+            hidden_dims=self.hidden_dims,
         ).to(self.device)
         self.target_critic = copy.deepcopy(self.critic).to(self.device)
         for parameter in self.target_critic.parameters():

@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from uav_multi_relay import MultiRelayEnvironment
 from uav_multi_relay.learning import MultiAgentReplayBuffer, ParameterSharingMASAC
-from uav_multi_relay.training import MASACTrainingConfig, train_masac
+from uav_multi_relay.training import MASACCheckpointMetadata, MASACTrainingConfig, save_masac_checkpoint, train_masac
 
 
 def main() -> None:
@@ -28,6 +28,7 @@ def main() -> None:
     parser.add_argument("--update-after-steps", type=int, default=1_000)
     parser.add_argument("--updates-per-step", type=int, default=1)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--checkpoint-out")
     args = parser.parse_args()
 
     np.random.seed(args.seed)
@@ -62,13 +63,21 @@ def main() -> None:
         seed=args.seed,
     )
     summary = train_masac(env, agent, replay, config)
-    print(json.dumps({
+    result = {
         "total_environment_steps": summary.total_environment_steps,
         "total_updates": summary.total_updates,
         "completed_episodes": summary.completed_episodes,
         "mean_rate_e2e_bps": summary.mean_rate_e2e_bps,
         "intervention_rate": summary.intervention_rate,
-    }, allow_nan=False))
+    }
+    if args.checkpoint_out:
+        checkpoint_path = save_masac_checkpoint(
+            args.checkpoint_out,
+            agent,
+            MASACCheckpointMetadata(summary.total_environment_steps, summary.total_updates, summary.completed_episodes),
+        )
+        result["checkpoint_path"] = str(checkpoint_path)
+    print(json.dumps(result, allow_nan=False))
 
 
 if __name__ == "__main__":
