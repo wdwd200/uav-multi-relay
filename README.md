@@ -84,7 +84,9 @@ python scripts/train.py --steps 30 --batch-size 4 --random-action-steps 4 \
 ```
 
 The script infers observation dimensions from the environment reset and prints a
-compact JSON summary. It does not write checkpoints or training logs.
+compact JSON summary. By default it writes no training logs; `--checkpoint-out`
+optionally saves one final checkpoint. Complete logs, periodic evaluation, and
+best-checkpoint selection are handled by `run_experiment.py`.
 
 Save a model checkpoint and evaluate it:
 

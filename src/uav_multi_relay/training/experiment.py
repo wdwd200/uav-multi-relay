@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import platform
 import sys
 from dataclasses import asdict, dataclass
@@ -126,18 +127,27 @@ def run_masac_experiment(
     latest_evaluation: MASACEvaluationSummary | None = None
     with training_log_path.open("w", encoding="utf-8") as training_handle, evaluation_log_path.open("w", encoding="utf-8") as evaluation_handle:
         def progress_callback(progress: MASACTrainingProgress) -> None:
-            payload = {
-                "environment_steps": progress.environment_steps,
-                "total_updates": progress.total_updates,
-                "completed_episodes": progress.completed_episodes,
-                "replay_size": progress.replay_size,
-                "mean_rate_e2e_bps": progress.mean_rate_e2e_bps,
-                "intervention_rate": progress.intervention_rate,
-                **_metrics_payload(progress.last_update_metrics),
-            }
-            _write_json_line(training_handle, payload)
             nonlocal best_mean_return, latest_evaluation
-            if progress.environment_steps % experiment_config.evaluation_interval_steps != 0 and progress.environment_steps != training_config.total_environment_steps:
+            should_log = (
+                progress.environment_steps % experiment_config.log_interval_steps == 0
+                or progress.environment_steps == training_config.total_environment_steps
+            )
+            should_evaluate = (
+                progress.environment_steps % experiment_config.evaluation_interval_steps == 0
+                or progress.environment_steps == training_config.total_environment_steps
+            )
+            if should_log:
+                payload = {
+                    "environment_steps": progress.environment_steps,
+                    "total_updates": progress.total_updates,
+                    "completed_episodes": progress.completed_episodes,
+                    "replay_size": progress.replay_size,
+                    "mean_rate_e2e_bps": progress.mean_rate_e2e_bps,
+                    "intervention_rate": progress.intervention_rate,
+                    **_metrics_payload(progress.last_update_metrics),
+                }
+                _write_json_line(training_handle, payload)
+            if not should_evaluate:
                 return
             latest_evaluation = evaluate_masac(
                 evaluation_env,
@@ -154,7 +164,10 @@ def run_masac_experiment(
             agent,
             replay_buffer,
             training_config,
-            progress_interval_steps=experiment_config.log_interval_steps,
+            progress_interval_steps=math.gcd(
+                experiment_config.log_interval_steps,
+                experiment_config.evaluation_interval_steps,
+            ),
             progress_callback=progress_callback,
         )
     save_masac_checkpoint(final_checkpoint_path, agent, MASACCheckpointMetadata(training_summary.total_environment_steps, training_summary.total_updates, training_summary.completed_episodes))
