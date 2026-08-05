@@ -18,6 +18,7 @@ The logical topology is `H -> R1 -> ... -> RK -> L`.
 - Requested actions and safety-filtered executed normalized actions in environment info.
 - Fixed-capacity multi-agent replay storage with deterministic sampling.
 - Parameter-sharing MASAC one-batch update core with target critics and entropy temperature.
+- Finite-horizon cross-entropy MPC with rolling-horizon control.
 
 The environment accepts relay actions with shape `(K, 3)` in `[-1, 1]`.
 H/L waypoint paths are generated reproducibly from `reset(seed=...)`, and the
@@ -39,7 +40,6 @@ observation, reward, terminated, truncated, info = env.step(
 ```
 
 Multi-agent reinforcement learning remains intentionally unimplemented.
-Model-predictive control is also not implemented.
 
 Shared Gaussian Actor and centralized twin-Q Critic network building blocks are
 implemented for the learning foundation. The replay buffer stores the
@@ -48,6 +48,17 @@ termination separate from time-limit truncation. Parameter-sharing MASAC now
 implements action selection, critic targets, one-batch actor/critic/alpha updates,
 and Polyak target updates. Environment collection loops, checkpoints, and full
 training experiments are not implemented.
+
+The MPC planner predicts on a deep copy of the environment and optimizes the
+discounted full team reward. It executes only the first action of the selected
+joint sequence:
+
+```python
+from uav_multi_relay.policies import MPCConfig, mpc_actions
+
+config = MPCConfig(horizon=2, population_size=6, iterations=2)
+action = mpc_actions(env, config=config, seed=0)
+```
 
 ## Installation
 
