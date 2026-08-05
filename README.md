@@ -39,8 +39,9 @@ observation, reward, terminated, truncated, info = env.step(
 )
 ```
 
-The learning foundation is implemented; complete training, evaluation,
-checkpoint, and experiment workflows remain unfinished.
+The environment collection and parameter-sharing MASAC training loop are implemented.
+Checkpoints, an independent evaluator, multi-seed runs, and complete experiment
+workflows remain unfinished.
 
 Shared Gaussian Actor and centralized twin-Q Critic network building blocks are
 implemented for the learning foundation. The replay buffer stores the
@@ -71,3 +72,15 @@ python -m pip install -e ".[dev]"
 ```bash
 python -m pytest
 ```
+
+## MASAC Training
+
+Run a minimal training collection and update loop:
+
+```bash
+python scripts/train.py --steps 30 --batch-size 4 --random-action-steps 4 \
+  --update-after-steps 4 --updates-per-step 1 --seed 0
+```
+
+The script infers observation dimensions from the environment reset and prints a
+compact JSON summary. It does not write checkpoints or training logs.
