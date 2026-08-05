@@ -78,6 +78,34 @@ def test_updates_wait_for_both_thresholds_and_repeat_per_step() -> None:
     assert replay.size == 5
 
 
+def test_progress_callback_hits_intervals_and_final_step_once() -> None:
+    env, agent, replay = _parts()
+    progress = []
+    train_masac(
+        env, agent, replay,
+        MASACTrainingConfig(total_environment_steps=5, replay_capacity=16, batch_size=8, random_action_steps=5, update_after_steps=9),
+        progress_interval_steps=2,
+        progress_callback=progress.append,
+    )
+    assert [item.environment_steps for item in progress] == [2, 4, 5]
+    assert [item.replay_size for item in progress] == [2, 4, 5]
+
+
+def test_progress_callback_validation_and_exception_propagation() -> None:
+    env, agent, replay = _parts()
+    config = MASACTrainingConfig(total_environment_steps=1, replay_capacity=16, batch_size=8, random_action_steps=1, update_after_steps=9)
+    with pytest.raises(ValueError):
+        train_masac(env, agent, replay, config, progress_callback=lambda _: None)
+    with pytest.raises(ValueError):
+        train_masac(env, agent, replay, config, progress_interval_steps=0, progress_callback=lambda _: None)
+
+    def fail(_: object) -> None:
+        raise RuntimeError("callback failure")
+
+    with pytest.raises(RuntimeError, match="callback failure"):
+        train_masac(env, agent, replay, config, progress_interval_steps=1, progress_callback=fail)
+
+
 def test_truncation_resets_before_the_next_step() -> None:
     base = MultiRelayEnvironment()
     env = RecordingEnvironment(MultiRelayEnvironment(replace(base.config, num_relays=1, max_steps=2)))

@@ -1,31 +1,27 @@
-# Codex 执行计划：阶段 3E——Checkpoint 与独立评估
+# Codex 执行计划：阶段 3F——训练日志、周期评估与实验运行器
 
-## 1. 本次目标
+## 1. 目标
 
-完成两项功能：
+在现有 MASAC 训练、Checkpoint 和独立评估基础上，实现：
 
-1. 保存和加载 MASAC Agent checkpoint；
-2. 使用确定性 Actor 独立评估已保存的模型。
+```text
+单次实验配置
+→ 连续训练
+→ 周期记录训练指标
+→ 周期确定性评估
+→ 保存最佳与最终 Checkpoint
+→ 输出完整实验目录
+```
 
-本阶段的 checkpoint 包含：
+本次不实现：
 
-- Actor；
-- Critic；
-- Target Critic；
-- Alpha；
-- 三个优化器；
-- Agent 架构和超参数；
-- 训练步数等元数据。
+- 多随机种子批量运行；
+- 规则基线和 MPC 对比；
+- MAPPO、MATD3、MADDPG；
+- 图表和统计显著性分析；
+- 中断训练的精确恢复。
 
-本阶段不保存：
-
-- Replay Buffer；
-- 环境当前 episode 状态；
-- 完整环境配置快照。
-
-因此 checkpoint 可用于模型评估和继续优化器状态，但不宣称能够逐位恢复中断时的完整训练轨迹。
-
-开始后使用本计划覆盖 `AGENTS.md`。
+开始工作后，用本计划覆盖根目录 `AGENTS.md`。
 
 ------
 
@@ -34,283 +30,299 @@
 新增：
 
 ```text
-src/uav_multi_relay/training/checkpoints.py
-src/uav_multi_relay/training/evaluator.py
-scripts/evaluate.py
-tests/test_checkpoints.py
-tests/test_evaluation.py
+src/uav_multi_relay/training/experiment.py
+scripts/run_experiment.py
+tests/test_experiment.py
 ```
 
 修改：
 
 ```text
-src/uav_multi_relay/learning/masac.py
-src/uav_multi_relay/training/__init__.py
 src/uav_multi_relay/training/trainer.py
-scripts/train.py
+src/uav_multi_relay/training/__init__.py
 README.md
 AGENTS.md
 aaa.md
 ```
 
-不得修改环境、通信、奖励、安全过滤、MPC 和 MASAC 更新公式。
+不得修改环境、通信、安全过滤、奖励、Replay Buffer、MPC 或 MASAC 更新公式。
+
+不得增加新依赖。
 
 ------
 
-## 3. Checkpoint
+## 3. 训练进度回调
 
-### 3.1 Agent 配置记录
-
-在 `ParameterSharingMASAC` 中保存：
-
-```python
-self.hidden_dims
-```
-
-必须是经过验证后的不可变整数元组。
-
-Checkpoint 中记录：
-
-```text
-local_observation_dim
-global_state_dim
-num_relays
-action_dim
-hidden_dims
-gamma
-tau
-actor_learning_rate
-critic_learning_rate
-alpha_learning_rate
-initial_alpha
-target_entropy
-```
-
-### 3.2 接口
-
-在 `training/checkpoints.py` 中实现：
+在 `trainer.py` 中新增：
 
 ```python
 @dataclass(frozen=True)
-class MASACCheckpointMetadata:
+class MASACTrainingProgress:
     environment_steps: int
-    updates: int
+    total_updates: int
     completed_episodes: int
+    replay_size: int
+    mean_rate_e2e_bps: float
+    intervention_rate: float
+    last_update_metrics: MASACUpdateMetrics | None
 ```
+
+扩展：
+
+```python
+def train_masac(
+    env: MultiRelayEnvironment,
+    agent: ParameterSharingMASAC,
+    replay_buffer: MultiAgentReplayBuffer,
+    config: MASACTrainingConfig,
+    *,
+    progress_interval_steps: int | None = None,
+    progress_callback: Callable[[MASACTrainingProgress], None] | None = None,
+) -> MASACTrainingSummary:
+```
+
+要求：
+
+1. 两个参数均不提供时，保持现有行为不变；
+   2.提供 callback 时必须同时提供正整数 interval；
+2. 在达到 interval 整数倍时调用 callback；
+3. 最后一个训练步始终调用一次，若已在该步调用则不得重复；
+4. 回调发生在该环境步的 transition、更新和 episode 处理完成之后；
+5. 进度中的统计为从训练开始到当前步的累计值；
+6. 回调异常正常向外传播，不得静默忽略。
+
+------
+
+## 4. 实验运行器
+
+在 `training/experiment.py` 中实现：
+
+```python
+@dataclass(frozen=True)
+class MASACExperimentConfig:
+    output_directory: str | Path
+    log_interval_steps: int = 1_000
+    evaluation_interval_steps: int = 5_000
+    evaluation_episodes: int = 10
+    evaluation_seed: int = 10_000
+```
+
+所有 interval 和 episode 数必须为正整数，布尔值无效。
 
 实现：
 
 ```python
-def save_masac_checkpoint(
-    path: str | Path,
-    agent: ParameterSharingMASAC,
-    metadata: MASACCheckpointMetadata,
-) -> Path:
+@dataclass(frozen=True)
+class MASACExperimentResult:
+    output_directory: Path
+    final_checkpoint: Path
+    best_checkpoint: Path
+    training_log: Path
+    evaluation_log: Path
+    summary_file: Path
+    best_mean_return: float
 ```
 
 以及：
 
 ```python
-def load_masac_checkpoint(
-    path: str | Path,
-    device: str | torch.device | None = None,
-) -> tuple[ParameterSharingMASAC, MASACCheckpointMetadata]:
-```
-
-Checkpoint 格式必须包含：
-
-```text
-format_version = 1
-agent_config
-actor_state_dict
-critic_state_dict
-target_critic_state_dict
-actor_optimizer_state_dict
-critic_optimizer_state_dict
-alpha_optimizer_state_dict
-log_alpha
-metadata
-```
-
-要求：
-
-- 使用 `torch.save()`；
-- 使用同目录临时文件并通过 `os.replace()` 原子替换；
-- 保存失败时清理临时文件；
-- 加载时使用 `map_location`；
-- 优先使用 `torch.load(..., weights_only=True)`；
-- 缺少字段、版本错误、非法元数据或架构不一致时抛出 `ValueError`；
-- 加载后 Target Critic 参数仍为 `requires_grad=False`；
-- 不接受来源不可信的 checkpoint。
-
-------
-
-## 4. 独立评估器
-
-在 `training/evaluator.py` 中实现：
-
-```python
-@dataclass(frozen=True)
-class MASACEvaluationConfig:
-    episodes: int = 10
-    seed: int = 0
-```
-
-实现单 episode 结果和汇总结果数据类，至少包含：
-
-```text
-episode return
-episode length
-平均端到端速率
-最低端到端速率
-安全过滤介入率
-terminated
-truncated
-```
-
-汇总至少包含：
-
-```text
-episode 数量
-平均 return
-return 标准差
-平均端到端速率
-全部 episode 中的最低速率
-平均介入率
-terminated episode 比例
-每个 episode 的详细结果
-```
-
-实现：
-
-```python
-def evaluate_masac(
-    env: MultiRelayEnvironment,
+def run_masac_experiment(
+    training_env: MultiRelayEnvironment,
+    evaluation_env: MultiRelayEnvironment,
     agent: ParameterSharingMASAC,
-    config: MASACEvaluationConfig,
-) -> MASACEvaluationSummary:
+    replay_buffer: MultiAgentReplayBuffer,
+    training_config: MASACTrainingConfig,
+    experiment_config: MASACExperimentConfig,
+) -> MASACExperimentResult:
 ```
 
-要求：
+### 4.1 输出目录
 
-1. 深拷贝传入环境，不修改原环境；
+输出目录必须是：
 
-2. 每个 episode 使用：
+- 不存在；或
+- 已存在但为空。
 
-   ```python
-   seed = config.seed + episode_index
-   ```
+非空目录必须抛出 `ValueError`，不得覆盖旧实验。
 
-3. 始终调用：
-
-   ```python
-   agent.act(local_observation, deterministic=True)
-   ```
-
-4. 不写 Replay Buffer；
-
-5. 不执行 Agent 更新；
-
-6. 不修改模型参数或优化器状态；
-
-7. 运行至 `terminated` 或 `truncated`；
-
-8. 直接使用环境 reward 和 `info` 统计指标；
-
-9. 所有返回统计必须有限。
-
-------
-
-## 5. 脚本集成
-
-### 5.1 train.py
-
-增加可选参数：
+创建以下文件：
 
 ```text
---checkpoint-out
+run_config.json
+training_metrics.jsonl
+evaluation_metrics.jsonl
+best_checkpoint.pt
+final_checkpoint.pt
+summary.json
 ```
 
-训练完成后，若提供该参数，则保存 Agent checkpoint。
+不得生成 CSV、图表或 TensorBoard 文件。
 
-元数据使用训练摘要中的：
+### 4.2 配置记录
+
+`run_config.json` 至少记录：
+
+- 训练配置；
+- 实验配置；
+- Agent 结构和学习率；
+- 中继数量；
+- local/global observation 维度；
+- action dimension；
+- Python、NumPy 和 PyTorch 版本。
+
+所有 JSON 必须使用：
+
+```python
+allow_nan=False
+```
+
+### 4.3 训练日志
+
+每次训练进度回调向 `training_metrics.jsonl` 写入一行，至少包含：
 
 ```text
-total_environment_steps
+environment_steps
 total_updates
 completed_episodes
+replay_size
+mean_rate_e2e_bps
+intervention_rate
+critic_loss
+actor_loss
+alpha_loss
+alpha
 ```
 
-JSON 摘要增加：
+尚未发生更新时，损失字段写 `null`，不得写 NaN。
+
+每写一行后立即 `flush()`。
+
+### 4.4 周期评估
+
+在以下训练步执行确定性评估：
 
 ```text
-checkpoint_path
+evaluation_interval_steps 的整数倍
+最终训练步
 ```
 
-未指定时不得创建 checkpoint。
+若最终步已经完成周期评估，不得重复。
 
-同时在 `train_masac()` 开始时增加一致性检查：
+调用现有：
 
 ```python
-replay_buffer.capacity == config.replay_capacity
+evaluate_masac(...)
 ```
 
-不一致时抛出 `ValueError`。
+评估种子固定使用：
 
-### 5.2 evaluate.py
+```python
+experiment_config.evaluation_seed
+```
+
+每次评估使用相同轨迹集合，便于纵向比较。
+
+向 `evaluation_metrics.jsonl` 写入一行，至少包含：
+
+```text
+environment_steps
+mean_return
+return_std
+mean_rate_e2e_bps
+minimum_rate_e2e_bps
+mean_intervention_rate
+terminated_episode_rate
+```
+
+### 4.5 Checkpoint
+
+- 每次评估的 `mean_return` 严格高于历史最佳值时，覆盖保存 `best_checkpoint.pt`；
+- 训练完成后保存 `final_checkpoint.pt`；
+- Checkpoint 元数据使用当时真实的环境步数、更新次数和完成 episode 数；
+- 最终步必须至少产生一次评估，因此 `best_checkpoint.pt` 必须存在；
+- 不保存 Replay Buffer。
+
+### 4.6 最终汇总
+
+`summary.json` 至少包含：
+
+```text
+训练总步数
+更新总次数
+完成 episode 数
+训练平均速率
+训练安全干预率
+最终评估指标
+最佳 mean return
+最佳 Checkpoint 路径
+最终 Checkpoint 路径
+日志路径
+```
+
+返回的 `MASACExperimentResult` 必须与文件内容一致。
+
+------
+
+## 5. 命令行脚本
+
+新增：
+
+```text
+scripts/run_experiment.py
+```
 
 支持：
 
 ```text
---checkpoint
---episodes
+--output-dir
+--steps
 --seed
+--num-relays
+--batch-size
+--random-action-steps
+--update-after-steps
+--updates-per-step
+--log-interval
+--evaluation-interval
+--evaluation-episodes
+--evaluation-seed
 --device
 ```
 
-流程：
+要求：
 
-1. 加载 checkpoint；
-2. 根据 checkpoint 的 `num_relays` 创建环境；
-3. reset 后核对 observation 维度；
-4. 调用 `evaluate_masac()`；
-5. 输出有限 JSON 汇总。
+1. 设置 NumPy 和 PyTorch seed；
+2. 自动推断 observation 维度；
+3. 创建独立训练环境和评估环境；
+4. 创建 Agent、Replay Buffer 和配置；
+5. 调用 `run_masac_experiment()`；
+6. 最后向终端输出一份有限 JSON 摘要；
+7. 不在脚本中复制训练或评估逻辑。
 
-不得在评估脚本中进行训练或参数更新。
+保留现有 `train.py` 和 `evaluate.py`，不得删除。
 
 ------
 
 ## 6. 测试
 
-### Checkpoint 测试
+新增 `tests/test_experiment.py`，并补充必要的 trainer 测试，至少覆盖：
 
-至少覆盖：
+1. 训练回调在正确步数触发，最终步不重复；
+2. 未提供 callback 时原训练行为不变；
+3. 非法 interval 被拒绝；
+4. 非空输出目录被拒绝；
+5. 所有规定文件均生成；
+6. JSON 和 JSONL 每一行都可解析且不含 NaN；
+7. 训练日志步数严格递增；
+8. 周期评估发生在预期步数和最终步；
+9. 相同评估轨迹集合被重复使用；
+10. 最佳 Checkpoint 只在 `mean_return` 改善时更新；
+11. 最佳和最终 Checkpoint 均可加载；
+12. Checkpoint 元数据与对应训练步一致；
+13. 使用小网络完成真实短实验，结果全部有限；
+14. 支持至少 `K=1` 和 `K=4`。
 
-- 保存后文件存在且没有残留临时文件；
-- 完成至少一次更新后保存和加载；
-- 加载前后确定性动作完全一致；
-- Actor、Critic、Target Critic 和 Alpha 状态一致；
-- 优化器状态已恢复；
-- 原 Agent 与加载 Agent 在相同随机种子、相同 batch 下继续更新后结果一致；
-- 元数据正确恢复；
-- 错误版本、缺少字段和损坏文件被拒绝；
-- Target Critic 加载后仍冻结。
-
-### 评估测试
-
-至少覆盖：
-
-- 精确执行配置的 episode 数量；
-- episode seed 按顺序递增；
-- 始终使用确定性动作；
-- 不修改传入环境；
-- 不修改 Agent 参数和优化器状态；
-- 所有指标有限；
-- 支持 `K=1` 和 `K=4`；
-- 提前终止和正常截断均能统计；
-- 从 checkpoint 加载后可以完成真实环境评估。
-
-测试使用小网络和短 episode。
+测试必须使用临时目录和短训练流程，不得在仓库根目录遗留运行产物。
 
 ------
 
@@ -318,10 +330,11 @@ replay_buffer.capacity == config.replay_capacity
 
 README 增加：
 
-- 保存 checkpoint 示例；
-- 加载并评估示例；
-- checkpoint 包含和不包含的内容；
-- 明确当前尚不能精确恢复 Replay Buffer 和 episode 中间状态。
+- 单次正式实验命令；
+- 输出目录文件说明；
+- 最佳与最终 Checkpoint 的区别；
+- 周期评估使用固定轨迹集合；
+- 尚未实现多随机种子和对比算法批量实验。
 
 运行：
 
@@ -330,62 +343,59 @@ python -m pytest
 python -m compileall -q src tests scripts
 ```
 
-训练并保存 checkpoint：
+执行冒烟实验：
 
 ```bash
-python scripts/train.py \
+python scripts/run_experiment.py \
+  --output-dir masac_experiment_smoke \
   --steps 20 \
   --batch-size 4 \
   --random-action-steps 4 \
   --update-after-steps 4 \
+  --log-interval 5 \
+  --evaluation-interval 10 \
+  --evaluation-episodes 2 \
   --seed 0 \
-  --checkpoint-out masac_smoke.pt
-```
-
-评估：
-
-```bash
-python scripts/evaluate.py \
-  --checkpoint masac_smoke.pt \
-  --episodes 2 \
-  --seed 100 \
+  --evaluation-seed 100 \
   --device cpu
 ```
 
-两个脚本输出的 JSON 必须有限。
+确认所有输出文件存在且 JSON 有限后，删除：
 
-测试完成后删除根目录中的 `masac_smoke.pt`，不得提交测试生成物。
+```text
+masac_experiment_smoke/
+```
+
+不得提交实验产物或缓存文件。
 
 ------
 
 ## 8. Git 与结果记录
 
-提交代码：
+提交代码并推送：
 
 ```bash
-git add AGENTS.md README.md scripts/train.py scripts/evaluate.py \
-  src/uav_multi_relay/learning/masac.py \
-  src/uav_multi_relay/training \
-  tests/test_checkpoints.py tests/test_evaluation.py
-git commit -m "stage-3: add MASAC checkpoints and evaluation"
+git add AGENTS.md README.md scripts/run_experiment.py \
+  src/uav_multi_relay/training tests/test_experiment.py
+git commit -m "stage-3: add MASAC experiment runner"
 git push
 ```
 
-随后覆盖写入 `aaa.md`：
+随后使用真实最终结果覆盖写入 `aaa.md`：
 
 ```markdown
 # 本次执行结果
 
-- 阶段：3E
-- 任务：MASAC Checkpoint 与独立评估
+- 阶段：3F
+- 任务：训练日志、周期评估与实验运行器
 - 完成状态：
 - 修改和新增文件：
-- Checkpoint 内容：
-- Checkpoint 限制：
-- 评估指标：
+- 实验输出文件：
+- 日志间隔：
+- 评估间隔与轨迹种子：
+- 最佳 Checkpoint 规则：
 - 测试结果：
-- 训练保存冒烟结果：
-- 加载评估冒烟结果：
+- 实验冒烟结果：
 - 编译验证：
 - 代码 Commit ID：
 - 当前分支：
@@ -393,23 +403,18 @@ git push
 - Git 异常：
 - 计划偏差：
 - 遗留问题：
-- 下一建议阶段：3F——训练日志、周期评估与实验运行器
+- 下一建议阶段：3G——MASAC 正式训练与基础基线比较
 ```
 
-提交结果文档：
+提交并推送：
 
 ```bash
 git add aaa.md
-git commit -m "docs: record MASAC checkpoint and evaluation result"
+git commit -m "docs: record MASAC experiment runner result"
 git push
 git status --short
 ```
 
-如果任何 Git 命令触发 `git.exe` 内存读取错误：
-
-- 立即停止且不自动重试；
-- 不运行 `git reset --hard`、`git gc` 或 `git prune`；
-- 记录触发错误的完整命令；
-- 在 `aaa.md` 中如实记录实际提交和推送状态。
+若 Git 命令触发 `git.exe` 内存读取错误，立即停止，不自动重试，不执行 `git reset --hard`、`git gc` 或 `git prune`，并在 `aaa.md` 中记录真实状态。
 
 最终工作区必须干净。

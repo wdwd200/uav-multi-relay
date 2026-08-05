@@ -98,3 +98,20 @@ The checkpoint contains the actor, critics, target critic, entropy temperature,
 optimizers, agent architecture/hyperparameters, and training counters. It does
 not contain the replay buffer, current environment episode, or a full environment
 configuration snapshot.
+
+## MASAC Experiments
+
+Run one logged training experiment with periodic deterministic evaluation:
+
+```bash
+python scripts/run_experiment.py --output-dir masac_experiment_smoke \
+  --steps 20 --batch-size 4 --random-action-steps 4 \
+  --update-after-steps 4 --log-interval 5 --evaluation-interval 10 \
+  --evaluation-episodes 2 --seed 0 --evaluation-seed 100
+```
+
+Each run directory contains `run_config.json`, training and evaluation JSONL
+logs, `best_checkpoint.pt`, `final_checkpoint.pt`, and `summary.json`. Existing
+non-empty directories are rejected. Periodic evaluations reuse fixed seeds for
+longitudinal comparison. Batch multi-seed experiments and baseline comparisons
+are not implemented.

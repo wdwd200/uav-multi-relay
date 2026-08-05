@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from numbers import Integral
+from collections.abc import Callable
 
 import numpy as np
 
@@ -54,6 +55,17 @@ class MASACTrainingSummary:
     last_update_metrics: MASACUpdateMetrics | None
 
 
+@dataclass(frozen=True)
+class MASACTrainingProgress:
+    environment_steps: int
+    total_updates: int
+    completed_episodes: int
+    replay_size: int
+    mean_rate_e2e_bps: float
+    intervention_rate: float
+    last_update_metrics: MASACUpdateMetrics | None
+
+
 def _observation_arrays(observation: object) -> tuple[np.ndarray, np.ndarray]:
     if not isinstance(observation, dict) or "local" not in observation or "global" not in observation:
         raise ValueError("observation must contain local and global arrays")
@@ -69,12 +81,31 @@ def train_masac(
     agent: ParameterSharingMASAC,
     replay_buffer: MultiAgentReplayBuffer,
     config: MASACTrainingConfig,
+    *,
+    progress_interval_steps: int | None = None,
+    progress_callback: Callable[[MASACTrainingProgress], None] | None = None,
 ) -> MASACTrainingSummary:
     """Collect exactly the configured number of steps and perform updates."""
     if not isinstance(config, MASACTrainingConfig):
         raise ValueError("config must be a MASACTrainingConfig")
     if replay_buffer.capacity != config.replay_capacity:
         raise ValueError("replay_buffer.capacity must equal config.replay_capacity")
+    if progress_callback is not None:
+        if not callable(progress_callback):
+            raise ValueError("progress_callback must be callable")
+        if (
+            progress_interval_steps is None
+            or isinstance(progress_interval_steps, bool)
+            or not isinstance(progress_interval_steps, Integral)
+            or progress_interval_steps <= 0
+        ):
+            raise ValueError("progress_interval_steps must be a positive integer when callback is provided")
+    elif progress_interval_steps is not None and (
+        isinstance(progress_interval_steps, bool)
+        or not isinstance(progress_interval_steps, Integral)
+        or progress_interval_steps <= 0
+    ):
+        raise ValueError("progress_interval_steps must be a positive integer")
     observation, _ = env.reset(seed=config.seed)
     local, global_state = _observation_arrays(observation)
     num_relays, local_dim = local.shape
@@ -114,6 +145,21 @@ def train_masac(
     interventions = 0
     last_metrics: MASACUpdateMetrics | None = None
 
+    def emit_progress(environment_steps: int) -> None:
+        if progress_callback is None:
+            return
+        mean_rate = float(np.mean(rates)) if rates else 0.0
+        intervention_rate = float(interventions / environment_steps) if environment_steps else 0.0
+        progress_callback(MASACTrainingProgress(
+            environment_steps=environment_steps,
+            total_updates=total_updates,
+            completed_episodes=completed_episodes,
+            replay_size=replay_buffer.size,
+            mean_rate_e2e_bps=mean_rate,
+            intervention_rate=intervention_rate,
+            last_update_metrics=last_metrics,
+        ))
+
     for collected_steps in range(config.total_environment_steps):
         requested = (
             rng.uniform(-1.0, 1.0, size=(num_relays, 3)).astype(np.float32)
@@ -145,6 +191,12 @@ def train_masac(
             current_length = 0
             observation, _ = env.reset(seed=config.seed + completed_episodes)
             local, global_state = _observation_arrays(observation)
+        environment_steps = collected_steps + 1
+        if progress_callback is not None and (
+            environment_steps % int(progress_interval_steps) == 0
+            or environment_steps == config.total_environment_steps
+        ):
+            emit_progress(environment_steps)
 
     mean_rate = float(np.mean(rates)) if rates else 0.0
     intervention_rate = float(interventions / config.total_environment_steps)
@@ -163,4 +215,4 @@ def train_masac(
     )
 
 
-__all__ = ["MASACTrainingConfig", "MASACTrainingSummary", "train_masac"]
+__all__ = ["MASACTrainingConfig", "MASACTrainingProgress", "MASACTrainingSummary", "train_masac"]
