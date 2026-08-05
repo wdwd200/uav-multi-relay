@@ -1,18 +1,23 @@
 # 本次执行结果
 
-- 阶段：3F（调度修复）
-- 任务：解耦训练日志与周期评估间隔
-- 完成状态：已完成并验证
-- 修改文件：AGENTS.md、README.md、src/uav_multi_relay/training/experiment.py、tests/test_experiment.py、aaa.md
-- 调度实现：训练器进度回调以 `gcd(log_interval_steps, evaluation_interval_steps)` 触发；回调内独立计算 `should_log` 和 `should_evaluate`，同一步只执行一次回调但分别完成所需操作。
-- 非整除间隔测试：`steps=5, log=3, evaluation=2` 时训练日志为 `[3, 5]`、评估为 `[2, 4, 5]`；`steps=7, log=2, evaluation=3` 时训练日志为 `[2, 4, 6, 7]`、评估为 `[3, 6, 7]`。
-- 完整测试结果：`python -m pytest -q` 通过，123 passed；仅有既有 `.pytest_cache` 路径的 PytestCacheWarning。
+- 阶段：3G
+- 任务：统一基线评估与 MASAC 初步性能验证
+- 完成状态：已完成；比较流程与开发级训练均成功，结果不作为正式多随机种子结论。
+- 修改和新增文件：AGENTS.md、README.md、scripts/run_experiment.py、scripts/compare_baselines.py、src/uav_multi_relay/analysis/__init__.py、src/uav_multi_relay/analysis/comparison.py、tests/test_comparison.py、aaa.md
+- 比较策略：MASAC、random、stationary、equal_spacing、greedy、MPC。
+- 公平比较方式：每种策略的第 i 个 episode 均使用 seed `20000 + i`；比较在输入环境的深拷贝上运行，不训练或修改 MASAC Agent。
+- 完整测试结果：`python -m pytest -q` 通过，129 passed；仅有既有 `.pytest_cache` 路径的 PytestCacheWarning。
 - 编译验证：`python -m compileall -q src tests scripts` 成功。
-- 冒烟实验结果：7 步非整除间隔命令成功，训练日志步数 `[2, 4, 6, 7]`，评估日志步数 `[3, 6, 7]`；输出 JSON 均有限，随后已删除 `interval_smoke/`。
-- 代码 Commit ID：0deb808
+- 开发级训练结果：5000 环境步、100 步 episode 上限、4001 次更新、74 个完整 episode；最佳三 episode 评估 mean return=424.66951993488146。产物位于被 Git 忽略的 `outputs/stage3g_seed0/`。
+- 基线比较结果：MASAC=425.5226367455427，random=342.3450442959243，stationary=425.8540277540572，equal_spacing=361.3956827556386，greedy=47.468663093761656，MPC=425.8540277540572（均为 3 个相同 seed episode 的平均 return）。
+- MASAC 是否超过随机策略：是，425.5226367455427 > 342.3450442959243。
+- MASAC 是否超过静止策略：否，425.5226367455427 < 425.8540277540572；未修改、筛选或美化该结果。
+- 平均安全干预率：MASAC=0.0，random=1.0，stationary=0.0，equal_spacing=0.99，greedy=1.0，MPC=0.0。
+- 各策略平均动作计算时间（秒/步）：MASAC=0.0006579256686381996，random=0.000008348668149362006，stationary=0.000002316664904356003，equal_spacing=0.00004232833239560325，greedy=0.11399076889889936，MPC=0.05296324500037978。
+- 代码 Commit ID：03baabd
 - 当前分支：main
 - GitHub 推送结果：代码提交已成功推送至 `origin/main`。
 - Git 异常：无；未发生 `git.exe` 内存读取错误。
 - 计划偏差：无。
-- 遗留问题：多随机种子批量运行、规则基线/MPC 对比、图表和显著性分析未实现。
-- 下一建议阶段：3G——MASAC 正式训练与基础基线比较
+- 遗留问题：MASAC 尚未超过静止基线，需要训练稳定性诊断与调参；多随机种子批量实验、图表和统计显著性分析未实现。
+- 下一建议阶段：3H——训练稳定性诊断与调参
