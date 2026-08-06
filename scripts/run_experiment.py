@@ -33,6 +33,8 @@ def main() -> None:
     parser.add_argument("--evaluation-interval", type=int, default=5_000)
     parser.add_argument("--evaluation-episodes", type=int, default=10)
     parser.add_argument("--evaluation-seed", type=int, default=10_000)
+    parser.add_argument("--checkpoint-interval", type=int)
+    parser.add_argument("--diagnostics", action="store_true")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--reward-rate", type=float, default=1.0)
     parser.add_argument("--reward-link", type=float, default=1.0)
@@ -63,7 +65,10 @@ def main() -> None:
     replay = MultiAgentReplayBuffer(100_000 if args.batch_size <= 100_000 else args.batch_size, args.num_relays, local_dim, global_dim, 3, seed=args.seed)
     agent = ParameterSharingMASAC(local_dim, global_dim, args.num_relays, action_dim=3, device=args.device)
     training_config = MASACTrainingConfig(args.steps, replay.capacity, args.batch_size, args.random_action_steps, args.update_after_steps, args.updates_per_step, args.seed)
-    experiment_config = MASACExperimentConfig(args.output_dir, args.log_interval, args.evaluation_interval, args.evaluation_episodes, args.evaluation_seed)
+    experiment_config = MASACExperimentConfig(
+        args.output_dir, args.log_interval, args.evaluation_interval, args.evaluation_episodes,
+        args.evaluation_seed, args.checkpoint_interval, args.diagnostics,
+    )
     result = run_masac_experiment(training_env, evaluation_env, agent, replay, training_config, experiment_config)
     run_config = json.loads(result.output_directory.joinpath("run_config.json").read_text(encoding="utf-8"))
     run_config["environment_config"] = {

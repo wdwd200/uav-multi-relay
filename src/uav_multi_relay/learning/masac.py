@@ -27,6 +27,24 @@ class MASACUpdateMetrics:
     q2_mean: float
     target_q_mean: float
     joint_log_probability_mean: float
+    q1_std: float
+    q2_std: float
+    q_gap_mean: float
+    target_q_std: float
+    td_error_mean: float
+    td_error_p95: float
+    td_error_max: float
+    actor_q_mean: float
+    replay_action_q_mean: float
+    actor_action_abs_mean: float
+    actor_action_saturation_rate: float
+    actor_action_any_relay_saturation_rate: float
+    actor_mean_abs_mean: float
+    actor_log_std_mean: float
+    actor_log_std_min: float
+    actor_log_std_max: float
+    actor_gradient_norm: float
+    critic_gradient_norm: float
 
 
 def _positive_int(value: object, name: str) -> int:
@@ -235,6 +253,17 @@ class ParameterSharingMASAC:
             raise ValueError("critic target is non-finite")
         return target
 
+    @staticmethod
+    def _gradient_norm(parameters: object) -> Tensor:
+        """Global L2 norm of already-computed gradients without a new backward pass."""
+        gradients = [parameter.grad.detach().reshape(-1) for parameter in parameters if parameter.grad is not None]
+        if not gradients:
+            return torch.zeros((), dtype=torch.float32)
+        result = torch.linalg.vector_norm(torch.cat(gradients))
+        if not torch.isfinite(result):
+            raise ValueError("gradient norm is non-finite")
+        return result
+
     def update(self, batch: ReplayBatch) -> MASACUpdateMetrics:
         """Perform one critic, actor, alpha, and Polyak target update."""
         tensors = self._prepare_batch(batch)
@@ -244,6 +273,7 @@ class ParameterSharingMASAC:
         critic_loss_tensor = F.mse_loss(q1, target) + F.mse_loss(q2, target)
         self.critic_optimizer.zero_grad(set_to_none=True)
         critic_loss_tensor.backward()
+        critic_gradient_norm = self._gradient_norm(self.critic.parameters()).detach()
         self.critic_optimizer.step()
         self.critic_optimizer.zero_grad(set_to_none=True)
 
@@ -258,6 +288,7 @@ class ParameterSharingMASAC:
             ).mean()
             self.actor_optimizer.zero_grad(set_to_none=True)
             actor_loss_tensor.backward()
+            actor_gradient_norm = self._gradient_norm(self.actor.parameters()).detach()
             self.actor_optimizer.step()
         finally:
             for parameter in self.critic.parameters():
@@ -276,6 +307,13 @@ class ParameterSharingMASAC:
             ):
                 target_parameter.mul_(1.0 - self.tau).add_(online_parameter, alpha=self.tau)
 
+        with torch.no_grad():
+            actor_mean, actor_log_std = self.actor(tensors["local_observations"])
+            td_errors = torch.cat((torch.abs(q1.detach() - target), torch.abs(q2.detach() - target)))
+            replay_action_q = torch.minimum(q1.detach(), q2.detach())
+            actor_q = torch.minimum(actor_q1.detach(), actor_q2.detach())
+            actor_saturation = torch.abs(actions.detach()) >= 0.95
+            any_relay_saturation = actor_saturation.any(dim=-1).any(dim=-1)
         values = {
             "critic_loss": critic_loss_tensor.detach(),
             "actor_loss": actor_loss_tensor.detach(),
@@ -285,6 +323,24 @@ class ParameterSharingMASAC:
             "q2_mean": q2.detach().mean(),
             "target_q_mean": target.detach().mean(),
             "joint_log_probability_mean": joint_log_probability.detach().mean(),
+            "q1_std": q1.detach().std(unbiased=False),
+            "q2_std": q2.detach().std(unbiased=False),
+            "q_gap_mean": torch.abs(q1.detach() - q2.detach()).mean(),
+            "target_q_std": target.detach().std(unbiased=False),
+            "td_error_mean": td_errors.mean(),
+            "td_error_p95": torch.quantile(td_errors, 0.95),
+            "td_error_max": td_errors.max(),
+            "actor_q_mean": actor_q.mean(),
+            "replay_action_q_mean": replay_action_q.mean(),
+            "actor_action_abs_mean": torch.abs(actions.detach()).mean(),
+            "actor_action_saturation_rate": actor_saturation.float().mean(),
+            "actor_action_any_relay_saturation_rate": any_relay_saturation.float().mean(),
+            "actor_mean_abs_mean": torch.abs(actor_mean).mean(),
+            "actor_log_std_mean": actor_log_std.mean(),
+            "actor_log_std_min": actor_log_std.min(),
+            "actor_log_std_max": actor_log_std.max(),
+            "actor_gradient_norm": actor_gradient_norm,
+            "critic_gradient_norm": critic_gradient_norm,
         }
         if not all(torch.isfinite(value).item() for value in values.values()):
             raise ValueError("MASAC update produced non-finite metrics")

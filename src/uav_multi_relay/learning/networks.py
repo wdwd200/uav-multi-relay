@@ -73,13 +73,13 @@ class SharedGaussianActor(nn.Module):
             )
         observations = observations.to(dtype=self.mean_head.weight.dtype, device=self.mean_head.weight.device)
         features = self.backbone(observations)
-        mean = torch.nan_to_num(self.mean_head(features), nan=0.0, posinf=1e6, neginf=-1e6)
-        log_std = torch.nan_to_num(
-            self.log_std_head(features),
-            nan=0.0,
-            posinf=self.log_std_max,
-            neginf=self.log_std_min,
-        ).clamp(self.log_std_min, self.log_std_max)
+        mean = self.mean_head(features)
+        raw_log_std = self.log_std_head(features)
+        if not torch.isfinite(mean).all():
+            raise ValueError("actor mean is non-finite")
+        if not torch.isfinite(raw_log_std).all():
+            raise ValueError("actor log_std is non-finite")
+        log_std = raw_log_std.clamp(self.log_std_min, self.log_std_max)
         return mean, log_std
 
     def sample(
@@ -134,6 +134,8 @@ class CentralizedTwinCritic(nn.Module):
         state = state.to(dtype=self.q1_net[0].weight.dtype, device=self.q1_net[0].weight.device)
         actions = actions.to(dtype=state.dtype, device=state.device)
         inputs = torch.cat((state, actions.flatten(start_dim=1)), dim=-1)
-        q1 = torch.nan_to_num(self.q1_net(inputs), nan=0.0, posinf=1e6, neginf=-1e6)
-        q2 = torch.nan_to_num(self.q2_net(inputs), nan=0.0, posinf=1e6, neginf=-1e6)
+        q1 = self.q1_net(inputs)
+        q2 = self.q2_net(inputs)
+        if not torch.isfinite(q1).all() or not torch.isfinite(q2).all():
+            raise ValueError("critic output is non-finite")
         return q1, q2

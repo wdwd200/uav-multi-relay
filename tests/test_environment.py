@@ -371,6 +371,40 @@ def test_safety_filter_normalizes_interpolated_applied_velocities() -> None:
     assert abs(applied[2] - relay.velocity_mps[2]) <= limits.max_vertical_accel_mps2 * 0.2
 
 
+def test_greedy_seed_20004_thirty_calls_preserve_velocity_bounds_across_resets() -> None:
+    config = scenario_environment_config(
+        default_environment_config(),
+        num_relays=4,
+        waypoint_radius_m=90.0,
+        max_steps=250,
+        reward_weights=RewardWeights(1.0, 1.0, 1.0, 0.1, 0.1, 1.0),
+    )
+    env = MultiRelayEnvironment(config)
+    env.reset(seed=20_004)
+    limits = config.relay_motion_limits
+    termination_count = 0
+    truncation_count = 0
+    reset_count = 0
+    for call_index in range(30):
+        actions = greedy_one_step_actions(env, sweeps=1)
+        _, reward, terminated, truncated, info = env.step(actions)
+        applied = np.asarray(info["applied_relay_velocities_mps"], dtype=float)
+        assert np.all(np.isfinite(applied))
+        assert np.all(np.linalg.norm(applied[:, :2], axis=1) <= limits.max_horizontal_speed_mps)
+        assert np.all(applied[:, 2] <= limits.max_climb_speed_mps)
+        assert np.all(applied[:, 2] >= -limits.max_descent_speed_mps)
+        assert np.isfinite(reward)
+        assert np.isfinite(float(info["rate_e2e_bps"]))
+        assert np.all(np.isfinite(np.asarray(info["intervention_norms"], dtype=float)))
+        if terminated or truncated:
+            termination_count += int(terminated)
+            truncation_count += int(truncated)
+            reset_count += 1
+            env.reset(seed=20_004 + reset_count)
+    assert reset_count == termination_count + truncation_count
+    assert termination_count >= 1, "the regression intentionally spans terminal episodes"
+
+
 def test_safety_filter_reports_no_feasible_endpoint_chain() -> None:
     relay = (UAVState("R1", [0.0, 0.0, 0.0], np.zeros(3)),)
     with pytest.raises(NoFeasibleActionError):

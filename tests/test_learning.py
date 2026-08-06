@@ -3,6 +3,7 @@ import sys
 import numpy as np
 import pytest
 import torch
+import copy
 
 from uav_multi_relay import MultiRelayEnvironment
 from uav_multi_relay.learning import (
@@ -361,10 +362,36 @@ def test_masac_update_supports_dynamic_relay_counts_and_returns_finite_metrics(
     metrics = masac.update(batch)
     assert isinstance(metrics, MASACUpdateMetrics)
     assert all(np.isfinite(value) for value in vars(metrics).values())
+    assert metrics.td_error_mean >= 0.0 and metrics.td_error_p95 >= 0.0 and metrics.td_error_max >= 0.0
+    assert metrics.actor_gradient_norm >= 0.0 and metrics.critic_gradient_norm >= 0.0
+    assert 0.0 <= metrics.actor_action_saturation_rate <= 1.0
+    assert metrics.actor_log_std_min <= metrics.actor_log_std_mean <= metrics.actor_log_std_max
     assert masac.alpha.item() > 0.0 and np.isfinite(masac.alpha.item())
     assert any(not torch.equal(before, after) for before, after in zip(actor_before, masac.actor.parameters()))
     assert any(not torch.equal(before, after) for before, after in zip(critic_before, masac.critic.parameters()))
     assert all(parameter.grad is None for parameter in masac.critic.parameters())
+
+
+def test_update_diagnostics_do_not_change_rng_or_optimization_result() -> None:
+    torch.manual_seed(123)
+    first = _small_masac()
+    second = copy.deepcopy(first)
+    batch = _masac_batch()
+    torch.manual_seed(456)
+    first.update(batch)
+    torch.manual_seed(456)
+    second.update(batch)
+    for first_module, second_module in ((first.actor, second.actor), (first.critic, second.critic), (first.target_critic, second.target_critic)):
+        assert all(torch.equal(left, right) for left, right in zip(first_module.parameters(), second_module.parameters()))
+    assert torch.equal(first.log_alpha, second.log_alpha)
+    first_state = first.actor_optimizer.state_dict()
+    second_state = second.actor_optimizer.state_dict()
+    assert first_state["param_groups"] == second_state["param_groups"]
+    assert first_state["state"].keys() == second_state["state"].keys()
+    for key in first_state["state"]:
+        for name, value in first_state["state"][key].items():
+            other = second_state["state"][key][name]
+            assert torch.equal(value, other) if isinstance(value, torch.Tensor) else value == other
 
 
 def test_masac_rejects_incompatible_batch_shapes() -> None:

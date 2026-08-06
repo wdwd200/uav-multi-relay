@@ -15,7 +15,7 @@ import numpy as np
 import torch
 
 from ..environment import MultiRelayEnvironment
-from ..learning import MultiAgentReplayBuffer, ParameterSharingMASAC
+from ..learning import MASACUpdateMetrics, MultiAgentReplayBuffer, ParameterSharingMASAC
 from .checkpoints import MASACCheckpointMetadata, save_masac_checkpoint
 from .evaluator import MASACEvaluationConfig, MASACEvaluationSummary, evaluate_masac
 from .trainer import MASACTrainingConfig, MASACTrainingProgress, MASACTrainingSummary, _observation_arrays, train_masac
@@ -28,6 +28,8 @@ class MASACExperimentConfig:
     evaluation_interval_steps: int = 5_000
     evaluation_episodes: int = 10
     evaluation_seed: int = 10_000
+    checkpoint_interval_steps: int | None = None
+    diagnostics: bool = False
 
     def __post_init__(self) -> None:
         output = Path(self.output_directory)
@@ -40,6 +42,14 @@ class MASACExperimentConfig:
                 raise ValueError(f"{name} must be a positive integer")
         if isinstance(self.evaluation_seed, bool) or not isinstance(self.evaluation_seed, Integral):
             raise ValueError("evaluation_seed must be an integer")
+        if self.checkpoint_interval_steps is not None and (
+            isinstance(self.checkpoint_interval_steps, bool)
+            or not isinstance(self.checkpoint_interval_steps, Integral)
+            or self.checkpoint_interval_steps <= 0
+        ):
+            raise ValueError("checkpoint_interval_steps must be a positive integer or None")
+        if not isinstance(self.diagnostics, bool):
+            raise ValueError("diagnostics must be a bool")
 
 
 @dataclass(frozen=True)
@@ -54,7 +64,7 @@ class MASACExperimentResult:
 
 
 def _metrics_payload(metrics: object) -> dict[str, float | None]:
-    names = ("critic_loss", "actor_loss", "alpha_loss", "alpha")
+    names = tuple(MASACUpdateMetrics.__dataclass_fields__)
     if metrics is None:
         return {name: None for name in names}
     values = {name: float(getattr(metrics, name)) for name in names}
@@ -107,6 +117,8 @@ def run_masac_experiment(
     best_checkpoint_path = output / "best_checkpoint.pt"
     final_checkpoint_path = output / "final_checkpoint.pt"
     summary_path = output / "summary.json"
+    checkpoint_directory = output / "checkpoints"
+    failure_traces_path = output / "failure_traces.jsonl"
     run_config = {
         "training_config": asdict(training_config),
         "experiment_config": {**asdict(experiment_config), "output_directory": str(output)},
@@ -123,9 +135,15 @@ def run_masac_experiment(
     with run_config_path.open("w", encoding="utf-8") as handle:
         json.dump(run_config, handle, allow_nan=False, indent=2)
 
+    if experiment_config.checkpoint_interval_steps is not None:
+        save_masac_checkpoint(
+            checkpoint_directory / "step_000000.pt", agent, MASACCheckpointMetadata(0, 0, 0)
+        )
+
     best_mean_return = -float("inf")
     latest_evaluation: MASACEvaluationSummary | None = None
     with training_log_path.open("w", encoding="utf-8") as training_handle, evaluation_log_path.open("w", encoding="utf-8") as evaluation_handle:
+        failure_handle = failure_traces_path.open("w", encoding="utf-8") if experiment_config.diagnostics else None
         def progress_callback(progress: MASACTrainingProgress) -> None:
             nonlocal best_mean_return, latest_evaluation
             should_log = (
@@ -146,7 +164,18 @@ def run_masac_experiment(
                     "intervention_rate": progress.intervention_rate,
                     **_metrics_payload(progress.last_update_metrics),
                 }
+                if progress.interval_diagnostics is not None:
+                    payload["diagnostics"] = progress.interval_diagnostics
                 _write_json_line(training_handle, payload)
+            if (
+                experiment_config.checkpoint_interval_steps is not None
+                and progress.environment_steps % experiment_config.checkpoint_interval_steps == 0
+            ):
+                save_masac_checkpoint(
+                    checkpoint_directory / f"step_{progress.environment_steps:06d}.pt",
+                    agent,
+                    MASACCheckpointMetadata(progress.environment_steps, progress.total_updates, progress.completed_episodes),
+                )
             if not should_evaluate:
                 return
             latest_evaluation = evaluate_masac(
@@ -159,17 +188,23 @@ def run_masac_experiment(
                 best_mean_return = latest_evaluation.mean_return
                 save_masac_checkpoint(best_checkpoint_path, agent, MASACCheckpointMetadata(progress.environment_steps, progress.total_updates, progress.completed_episodes))
 
-        training_summary = train_masac(
-            training_env,
-            agent,
-            replay_buffer,
-            training_config,
-            progress_interval_steps=math.gcd(
-                experiment_config.log_interval_steps,
-                experiment_config.evaluation_interval_steps,
-            ),
-            progress_callback=progress_callback,
-        )
+        try:
+            training_summary = train_masac(
+                training_env,
+                agent,
+                replay_buffer,
+                training_config,
+                progress_interval_steps=math.gcd(
+                    experiment_config.log_interval_steps,
+                    experiment_config.evaluation_interval_steps,
+                ),
+                progress_callback=progress_callback,
+                diagnostic_interval_steps=experiment_config.log_interval_steps if experiment_config.diagnostics else None,
+                failure_trace_callback=(lambda payload: _write_json_line(failure_handle, payload)) if failure_handle is not None else None,
+            )
+        finally:
+            if failure_handle is not None:
+                failure_handle.close()
     save_masac_checkpoint(final_checkpoint_path, agent, MASACCheckpointMetadata(training_summary.total_environment_steps, training_summary.total_updates, training_summary.completed_episodes))
     if latest_evaluation is None or not best_checkpoint_path.is_file():
         raise ValueError("final evaluation did not produce a best checkpoint")
@@ -185,6 +220,8 @@ def run_masac_experiment(
         "final_checkpoint": str(final_checkpoint_path),
         "training_log": str(training_log_path),
         "evaluation_log": str(evaluation_log_path),
+        "checkpoint_directory": str(checkpoint_directory) if experiment_config.checkpoint_interval_steps is not None else None,
+        "failure_traces": str(failure_traces_path) if experiment_config.diagnostics else None,
     }
     with summary_path.open("w", encoding="utf-8") as handle:
         json.dump(summary_payload, handle, allow_nan=False, indent=2)
