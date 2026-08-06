@@ -57,6 +57,70 @@ def test_velocity_change_respects_acceleration(limits: MotionLimits) -> None:
     assert abs(applied[2] - current[2]) <= 0.5
 
 
+@pytest.mark.parametrize(
+    "current",
+    [[5.0, 0.0, 0.0], [0.0, 0.0, 2.0], [0.0, 0.0, -3.0]],
+)
+def test_velocity_accepts_current_values_exactly_at_limits(
+    limits: MotionLimits, current: object
+) -> None:
+    applied = make_velocity_feasible(current, current, limits, 1.0)
+    assert np.linalg.norm(applied[:2]) <= limits.max_horizontal_speed_mps
+    assert -limits.max_descent_speed_mps <= applied[2] <= limits.max_climb_speed_mps
+
+
+@pytest.mark.parametrize(
+    "current",
+    [
+        [np.nextafter(5.0, np.inf), 0.0, 0.0],
+        [0.0, 0.0, np.nextafter(2.0, np.inf)],
+        [0.0, 0.0, np.nextafter(-3.0, -np.inf)],
+    ],
+)
+def test_velocity_normalizes_one_ulp_boundary_excess(
+    limits: MotionLimits, current: object
+) -> None:
+    applied = make_velocity_feasible(current, current, limits, 1.0)
+    assert np.linalg.norm(applied[:2]) <= limits.max_horizontal_speed_mps
+    assert -limits.max_descent_speed_mps <= applied[2] <= limits.max_climb_speed_mps
+
+
+def test_velocity_normalizes_reported_horizontal_boundary_rounding() -> None:
+    limits = MotionLimits(30.0, 12.0, 12.0, 15.0, 8.0)
+    applied = make_velocity_feasible(
+        [30.0, 0.0, 0.0], [30.000000000000004, 0.0, 0.0], limits, 0.2
+    )
+    assert np.linalg.norm(applied[:2]) <= limits.max_horizontal_speed_mps
+
+
+@pytest.mark.parametrize(
+    "current",
+    [[5.0 + 1e-6, 0.0, 0.0], [0.0, 0.0, 2.0 + 1e-6], [0.0, 0.0, -3.0 - 1e-6]],
+)
+def test_velocity_rejects_current_values_beyond_boundary_tolerance(
+    limits: MotionLimits, current: object
+) -> None:
+    with pytest.raises(ValueError, match="speed limits"):
+        make_velocity_feasible([0.0, 0.0, 0.0], current, limits, 1.0)
+
+
+def test_velocity_return_value_is_strictly_within_limits(limits: MotionLimits) -> None:
+    applied = make_velocity_feasible(
+        [100.0, -100.0, 100.0], [np.nextafter(5.0, np.inf), 0.0, -3.0], limits, 1.0
+    )
+    assert np.linalg.norm(applied[:2]) <= limits.max_horizontal_speed_mps
+    assert -limits.max_descent_speed_mps <= applied[2] <= limits.max_climb_speed_mps
+
+
+def test_repeated_boundary_motion_does_not_accumulate_an_invalid_velocity() -> None:
+    limits = MotionLimits(30.0, 12.0, 12.0, 15.0, 8.0)
+    current = np.array([30.000000000000004, 0.0, 0.0])
+    for _ in range(100):
+        current = make_velocity_feasible([30.0, 0.0, 0.0], current, limits, 0.2)
+        assert np.linalg.norm(current[:2]) <= limits.max_horizontal_speed_mps
+        assert -limits.max_descent_speed_mps <= current[2] <= limits.max_climb_speed_mps
+
+
 @pytest.mark.parametrize("current", [[6.0, 0.0, 0.0], [0.0, 0.0, 2.1], [0.0, 0.0, -3.1]])
 def test_velocity_rejects_infeasible_current_velocity(
     limits: MotionLimits, current: object

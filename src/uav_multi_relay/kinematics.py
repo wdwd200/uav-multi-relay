@@ -15,7 +15,17 @@ def _positive_finite(value: float, name: str) -> float:
 
 def _clip_norm(vector: np.ndarray, maximum: float) -> np.ndarray:
     norm = float(np.linalg.norm(vector))
-    return vector if norm <= maximum else vector * (maximum / norm)
+    if norm <= maximum:
+        return vector.copy()
+    clipped = vector * (maximum / norm)
+    # A second scale uses the next representable value below the limit so
+    # rounding cannot leave the returned norm just above the configured cap.
+    for _ in range(2):
+        clipped_norm = float(np.linalg.norm(clipped))
+        if clipped_norm <= maximum:
+            break
+        clipped *= np.nextafter(maximum, 0.0) / clipped_norm
+    return clipped
 
 
 def make_velocity_feasible(
@@ -26,14 +36,26 @@ def make_velocity_feasible(
 ) -> np.ndarray:
     """Apply acceleration and speed limits to a requested three-dimensional velocity."""
     requested = _vector3(requested_velocity_mps, "requested_velocity_mps")
-    current = _vector3(current_velocity_mps, "current_velocity_mps")
+    current = _vector3(current_velocity_mps, "current_velocity_mps").copy()
     delta_t = _positive_finite(delta_t_s, "delta_t_s")
-    if (
-        np.linalg.norm(current[:2]) > limits.max_horizontal_speed_mps
-        or current[2] > limits.max_climb_speed_mps
-        or current[2] < -limits.max_descent_speed_mps
-    ):
+    horizontal_tolerance = 1e-9 * max(1.0, limits.max_horizontal_speed_mps)
+    climb_tolerance = 1e-9 * max(1.0, limits.max_climb_speed_mps)
+    descent_tolerance = 1e-9 * max(1.0, limits.max_descent_speed_mps)
+    horizontal_norm = float(np.linalg.norm(current[:2]))
+    if horizontal_norm > limits.max_horizontal_speed_mps + horizontal_tolerance:
         raise ValueError("current_velocity_mps must satisfy the configured speed limits")
+    if current[2] > limits.max_climb_speed_mps + climb_tolerance:
+        raise ValueError("current_velocity_mps must satisfy the configured speed limits")
+    if current[2] < -limits.max_descent_speed_mps - descent_tolerance:
+        raise ValueError("current_velocity_mps must satisfy the configured speed limits")
+
+    # Normalize values accepted only because they are within floating-point
+    # tolerance before applying acceleration limits or propagating state.
+    if horizontal_norm > limits.max_horizontal_speed_mps:
+        current[:2] = _clip_norm(current[:2], limits.max_horizontal_speed_mps)
+    current[2] = float(
+        np.clip(current[2], -limits.max_descent_speed_mps, limits.max_climb_speed_mps)
+    )
 
     horizontal_delta = requested[:2] - current[:2]
     horizontal_delta = _clip_norm(

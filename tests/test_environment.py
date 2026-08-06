@@ -14,7 +14,9 @@ from uav_multi_relay.config import (
     EndpointTrajectoryConfig,
     EnvironmentConfig,
     FlightBounds,
+    RewardWeights,
     default_environment_config,
+    scenario_environment_config,
 )
 from uav_multi_relay.core import MotionLimits, UAVState
 from uav_multi_relay.environment import MultiRelayEnvironment
@@ -348,6 +350,27 @@ def test_safety_filter_checks_all_hard_constraints() -> None:
     assert np.all(np.isfinite(result.intervention_norms))
 
 
+def test_safety_filter_normalizes_interpolated_applied_velocities() -> None:
+    limits = MotionLimits(30.0, 12.0, 12.0, 15.0, 8.0)
+    relay = UAVState("R1", [0.0, 0.0, 100.0], [30.000000000000004, 0.0, 0.0])
+    result = filter_relay_velocities(
+        (relay,),
+        [[30.0, 0.0, 0.0]],
+        limits,
+        0.2,
+        FlightBounds([-200.0, -200.0, 30.0], [200.0, 200.0, 250.0]),
+        15.0,
+        150.0,
+        [-100.0, 0.0, 200.0],
+        [100.0, 0.0, 80.0],
+    )
+    applied = result.applied_velocities_mps[0]
+    assert np.linalg.norm(applied[:2]) <= limits.max_horizontal_speed_mps
+    assert -limits.max_descent_speed_mps <= applied[2] <= limits.max_climb_speed_mps
+    assert np.linalg.norm(applied[:2] - relay.velocity_mps[:2]) <= limits.max_horizontal_accel_mps2 * 0.2
+    assert abs(applied[2] - relay.velocity_mps[2]) <= limits.max_vertical_accel_mps2 * 0.2
+
+
 def test_safety_filter_reports_no_feasible_endpoint_chain() -> None:
     relay = (UAVState("R1", [0.0, 0.0, 0.0], np.zeros(3)),)
     with pytest.raises(NoFeasibleActionError):
@@ -519,3 +542,24 @@ def test_random_actions_run_for_500_steps_without_nan_or_unhandled_failure() -> 
         assert np.all(np.isfinite(info["hop_capacities_bps"]))
         if terminated or truncated:
             env.reset(seed=3)
+
+
+def test_greedy_fixed_velocity_boundary_regression_runs_30_steps() -> None:
+    base_config = default_environment_config()
+    config = scenario_environment_config(
+        base_config,
+        num_relays=4,
+        waypoint_radius_m=90.0,
+        max_steps=250,
+        reward_weights=RewardWeights(1.0, 1.0, 1.0, 0.1, 0.1, 1.0),
+    )
+    env = MultiRelayEnvironment(config)
+    env.reset(seed=20_004)
+    for _ in range(30):
+        _, _, terminated, truncated, info = env.step(greedy_one_step_actions(env, sweeps=1))
+        velocities = np.asarray(info["velocities_mps"])[1:-1]
+        assert np.all(np.linalg.norm(velocities[:, :2], axis=1) <= config.relay_motion_limits.max_horizontal_speed_mps)
+        assert np.all(velocities[:, 2] <= config.relay_motion_limits.max_climb_speed_mps)
+        assert np.all(velocities[:, 2] >= -config.relay_motion_limits.max_descent_speed_mps)
+        if terminated or truncated:
+            env.reset(seed=20_004)

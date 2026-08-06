@@ -129,18 +129,31 @@ def filter_relay_velocities(
     if not np.isfinite(hard_max_link_distance_m) or hard_max_link_distance_m <= 0:
         raise ValueError("hard_max_link_distance_m must be a positive finite value")
 
-    current = np.stack([state.velocity_mps for state in relay_states])
+    current = np.stack(
+        [
+            make_velocity_feasible(
+                state.velocity_mps, state.velocity_mps, limits, delta_t_s
+            )
+            for state in relay_states
+        ]
+    )
     feasible = np.stack(
         [
-            make_velocity_feasible(request, state.velocity_mps, limits, delta_t_s)
-            for request, state in zip(requested, relay_states)
+            make_velocity_feasible(request, velocity, limits, delta_t_s)
+            for request, velocity in zip(requested, current)
         ]
     )
     high_position = _vector3(high_candidate_position_m, "high_candidate_position_m")
     low_position = _vector3(low_candidate_position_m, "low_candidate_position_m")
 
     for scale in np.linspace(1.0, 0.0, 21):
-        applied = current + scale * (feasible - current)
+        interpolated = current + scale * (feasible - current)
+        applied = np.stack(
+            [
+                make_velocity_feasible(velocity, current_velocity, limits, delta_t_s)
+                for velocity, current_velocity in zip(interpolated, current)
+            ]
+        )
         relay_positions = np.stack(
             [state.position_m + velocity * delta_t_s for state, velocity in zip(relay_states, applied)]
         )
