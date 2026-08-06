@@ -25,6 +25,32 @@ def _positive_finite(value: float, name: str) -> float:
 
 
 @dataclass(frozen=True)
+class RewardWeights:
+    """Non-negative coefficients for the environment reward components."""
+
+    rate: float = 1.0
+    link: float = 1.0
+    separation: float = 1.0
+    intervention: float = 1.0
+    motion: float = 1.0
+    failure: float = 1.0
+
+    def __post_init__(self) -> None:
+        for name, value in vars(self).items():
+            try:
+                finite = bool(np.isfinite(value))
+                numeric = float(value)
+            except (TypeError, ValueError):
+                finite = False
+                numeric = float("nan")
+            if isinstance(value, bool) or not finite or numeric < 0.0:
+                raise ValueError(f"{name} must be a finite non-negative value")
+            object.__setattr__(self, name, numeric)
+        if self.rate <= 0.0:
+            raise ValueError("rate must be positive")
+
+
+@dataclass(frozen=True)
 class FlightBounds:
     """Closed three-dimensional bounds in which UAVs may fly."""
 
@@ -142,6 +168,7 @@ class EnvironmentConfig:
     channel: ChannelConfig
     high_trajectory: EndpointTrajectoryConfig = field(default_factory=_default_high_trajectory)
     low_trajectory: EndpointTrajectoryConfig = field(default_factory=_default_low_trajectory)
+    reward_weights: RewardWeights = field(default_factory=RewardWeights)
 
     def __post_init__(self) -> None:
         if isinstance(self.num_relays, bool) or not isinstance(self.num_relays, int) or self.num_relays < 1:
@@ -179,6 +206,8 @@ class EnvironmentConfig:
             raise ValueError("high_trajectory must be an EndpointTrajectoryConfig instance")
         if not isinstance(self.low_trajectory, EndpointTrajectoryConfig):
             raise ValueError("low_trajectory must be an EndpointTrajectoryConfig instance")
+        if not isinstance(self.reward_weights, RewardWeights):
+            raise ValueError("reward_weights must be a RewardWeights instance")
         lower_altitude = self.flight_bounds.minimum_m[2]
         upper_altitude = self.flight_bounds.maximum_m[2]
         for name, trajectory in (
@@ -224,4 +253,5 @@ def default_environment_config() -> EnvironmentConfig:
         ),
         high_trajectory=_default_high_trajectory(),
         low_trajectory=_default_low_trajectory(),
+        reward_weights=RewardWeights(),
     )

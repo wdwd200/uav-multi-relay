@@ -101,6 +101,27 @@ optimizers, agent architecture/hyperparameters, and training counters. It does
 not contain the replay buffer, current environment episode, or a full environment
 configuration snapshot.
 
+## Reward and Scenario Diagnostics
+
+`EnvironmentConfig.reward_weights` exposes explicit non-negative coefficients
+for rate, link, separation, intervention, motion, and failure terms. Defaults
+are all `1.0`, preserving the original reward scale. Motion cost measures only
+controlled relay velocities and accelerations; endpoint H/L motion is excluded.
+`info["reward_terms"]` retains raw components and includes `weighted_reward`.
+
+Generate a short scenario matrix without training MASAC:
+
+```bash
+python scripts/diagnose_scenarios.py --output scenario_diagnostics.json \
+  --radii 30 60 90 120 --max-steps 100 250 --episodes 5 \
+  --seed 30000 --policies stationary equal_spacing --num-relays 4
+```
+
+The JSON contains per-episode failure reasons and summaries for displacement,
+relay path length, link capacity/distance, reward components, termination, and
+intervention rates. Existing output files are never overwritten. Diagnostics
+are scenario evidence, not formal training or multi-seed experimental claims.
+
 ## MASAC Experiments
 
 Run one logged training experiment with periodic deterministic evaluation:

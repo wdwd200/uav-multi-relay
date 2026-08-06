@@ -371,6 +371,7 @@ class MultiRelayEnvironment:
         interventions = np.linalg.norm(requested - applied, axis=1)
         reward_terms = self._zero_reward_terms()
         reward_terms["failure_penalty"] = 1.0
+        reward_terms["weighted_reward"] = -self.config.reward_weights.failure
         info = self._info(
             old_states,
             requested_actions,
@@ -382,7 +383,7 @@ class MultiRelayEnvironment:
             reward_terms,
         )
         info["failure_reason"] = reason
-        return self._observation(communication["capacities_bps"]), -1.0, True, False, info
+        return self._observation(communication["capacities_bps"]), reward_terms["weighted_reward"], True, False, info
 
     def _communication(
         self,
@@ -508,12 +509,12 @@ class MultiRelayEnvironment:
             np.mean(filtered.intervention_norms)
             / self.config.relay_motion_limits.max_horizontal_speed_mps
         )
-        velocities = np.stack([state.velocity_mps for state in new_states])
-        old_velocities = np.stack([state.velocity_mps for state in old_states])
+        velocities = np.stack([state.velocity_mps for state in new_states[1:-1]])
+        old_velocities = np.stack([state.velocity_mps for state in old_states[1:-1]])
         speed_scale = max(
             self.config.relay_motion_limits.max_horizontal_speed_mps,
-            self.config.high_motion_limits.max_horizontal_speed_mps,
-            self.config.low_motion_limits.max_horizontal_speed_mps,
+            self.config.relay_motion_limits.max_climb_speed_mps,
+            self.config.relay_motion_limits.max_descent_speed_mps,
         )
         motion_cost = float(
             np.mean(np.sum((velocities / speed_scale) ** 2, axis=1))
@@ -527,7 +528,17 @@ class MultiRelayEnvironment:
             "intervention_cost": intervention_cost,
             "motion_cost": motion_cost,
         }
-        return float(rate_reward - link_cost - separation_cost - intervention_cost - motion_cost), terms
+        weights = self.config.reward_weights
+        weighted_reward = float(
+            weights.rate * rate_reward
+            - weights.link * link_cost
+            - weights.separation * separation_cost
+            - weights.intervention * intervention_cost
+            - weights.motion * motion_cost
+        )
+        terms["failure_penalty"] = 0.0
+        terms["weighted_reward"] = weighted_reward
+        return weighted_reward, terms
 
     def _info(
         self,
@@ -595,6 +606,8 @@ class MultiRelayEnvironment:
             "separation_cost": 0.0,
             "intervention_cost": 0.0,
             "motion_cost": 0.0,
+            "failure_penalty": 0.0,
+            "weighted_reward": 0.0,
         }
 
     def _require_reset(self) -> None:
