@@ -2,34 +2,29 @@
 
 - 阶段：3G-R2
 - 类型：阶段 3G 验收修复，不新增总计划阶段
-- 任务：固定场景重新训练与基线比较
-- 完成状态：未通过。规定的 20,000 步训练和完整 10-episode 七策略比较均因同一既有浮点边界错误中止。
-- 固定场景：K=4；H/L waypoint radius=90 m；max_steps=250；dt=现有默认值 0.2 s。
-- 奖励权重：rate=1.0，link=1.0，separation=1.0，intervention=0.1，motion=0.1，failure=1.0。
-- 训练步数：按规定请求 20,000 步；实际完成 8,253 步后失败。异常为 `ValueError: current_velocity_mps must satisfy the configured speed limits`。
-- 最佳评估步数：2,500；最佳 checkpoint 元数据为 environment_steps=2,500、updates=501、completed_episodes=18；该次评估 mean return=206.8078222273889。
-- 完整测试结果：`python -m pytest`，137 passed，1 个既有 PytestCacheWarning。
+- 任务：速度边界修复后重新训练与基线比较
+- 完成状态：数值稳定性修复、20,000 步训练和七策略比较均已完成；MASAC 未满足阶段 3G 性能判定。
+- 数值错误根因：合法水平速度因浮点舍入得到 `30.000000000000004 m/s`，平方和为 `900.0000000000001`，被无容差上限判断拒绝。
+- 容差规则：水平、上升、下降速度分别使用 `1e-9 * max(1.0, limit)` 的尺度相关容差；超过 `limit + tolerance` 仍拒绝。
+- 状态规范化方式：容差范围内的水平速度投影到最大速度球，垂直速度裁剪到上升/下降限制；安全过滤器每个插值候选再次执行可行化后再检查候选位置并写入状态。
+- 固定 greedy 回归结果：场景 K=4、waypoint radius=90、max_steps=250、seed=20004、greedy sweeps=1；连续执行 30 步成功，无速度边界异常。
+- 完整测试结果：`python -m pytest`，151 passed，1 个既有 PytestCacheWarning。
 - 编译验证：`python -m compileall -q src tests scripts` 成功。
-- 比较 episode 数：规定为 10；正式命令未完成。追踪显示 masac、random、stationary、equal_spacing、weighted_spacing 各完成 10/10；greedy 完成 4/10 后在 episode seed=20004 的第 14 步失败；mpc 尚未开始。
-- MASAC 平均 return：未生成正式 10-episode 结果。
-- Random 平均 return：未生成正式 10-episode 结果。
-- Stationary 平均 return：未生成正式 10-episode 结果。
-- Equal spacing 平均 return：未生成正式 10-episode 结果。
-- Weighted spacing 平均 return：未生成正式 10-episode 结果。
-- Greedy 平均 return：未生成正式 10-episode 结果。
-- MPC 平均 return：未运行。
-- 各策略平均端到端速率：未生成完整比较结果。
-- 各策略终止率：未生成完整比较结果。
-- 各策略安全干预率：未生成完整比较结果。
-- 各策略平均动作计算时间：未生成完整比较结果。
-- MASAC 相对 Stationary 的 return 提升：不计算，完整比较未完成。
-- MASAC 相对 Stationary 的速率提升：不计算，完整比较未完成。
-- 阶段 3G 是否通过：否，未满足判定规则；不延长训练、不更换随机种子、不修改场景或奖励权重。
-- 代码 Commit ID：381d4f4（`stage-3: configure dynamic MASAC baseline validation`）。
+- 实际训练步数：20,000；total_updates=18,001；completed_episodes=321；训练与评估日志数值均有限。
+- 最佳评估步数：12,500；best_mean_return=305.8242018569017；最终 20,000 步评估 mean_return=233.62625474320248。
+- 七策略比较完成情况：masac、random、stationary、equal_spacing、weighted_spacing、greedy、mpc 均完成 10/10 episode；episode seeds 为 20000 至 20009。
+- 各策略平均 return：MASAC=274.2579599049063；Random=567.9423682978447；Stationary=1068.0028132582956；Equal spacing=1073.7012570960767；Weighted spacing=1073.7012570960767；Greedy=57.668935407064474；MPC=1068.0028132582956。
+- 各策略平均端到端速率：MASAC=40886060.897320315；Random=42093415.4626989；Stationary=42955245.356898956；Equal spacing=43751985.203680724；Weighted spacing=43751985.203680724；Greedy=43774039.102143295；MPC=42955245.356898956 bps。
+- 各策略终止率：MASAC=1.0；Random=0.8；Stationary=0.0；Equal spacing=0.0；Weighted spacing=0.0；Greedy=1.0；MPC=0.0。
+- 各策略安全干预率：MASAC=1.0；Random=1.0；Stationary=0.0；Equal spacing=0.9952；Weighted spacing=0.9952；Greedy=1.0；MPC=0.0。
+- 各策略平均动作计算时间：MASAC=0.0006622007707733042 s；Random=0.0000083742863325404 s；Stationary=0.0000025063559412956234 s；Equal spacing=0.00004609524281695485 s；Weighted spacing=0.00005900223795324564 s；Greedy=0.1651461299992211 s；MPC=0.06890997779890895 s。
+- MASAC 相对 Stationary 的 return 提升：-74.32048338260536%。
+- MASAC 相对 Stationary 的速率提升：-4.817070516968455%。
+- 阶段 3G 是否通过：否。MASAC 平均 return 低于 Stationary 和 Random，平均速率低于 Stationary，终止率高于 Stationary。
+- 代码 Commit ID：6c5dff7（`fix: stabilize velocity limit boundaries`）。
 - 当前分支：main。
-- GitHub 推送结果：代码提交 381d4f4 已推送至 `origin/main`；本结果文档待本次提交后推送。
+- GitHub 推送结果：数值修复提交 6c5dff7 已推送至 `origin/main`；本结果文档待本次提交后推送。
 - Git 异常：无；未发生 `git.exe` 内存读取错误。
-- 计划偏差：训练在第 8,253 步中止；比较在 greedy/seed=20004/第 14 步中止。未修改环境状态转移、通信模型、奖励公式、安全过滤器、MPC、Replay Buffer 或 MASAC 更新公式。
-- 根因记录：失败前某 relay 的水平速度平方和为 `900.0000000000001`，即 `30.000000000000004 m/s`；安全校验使用无容差的 `> 30` 判断，拒绝了该浮点舍入值。该问题在训练和 greedy 比较中均可稳定复现。
-- 遗留问题：需要后续阶段决定并修复速度边界的数值容差/状态不变量问题后，才能完成固定场景正式训练与公平比较。
+- 计划偏差：无。场景、奖励权重、训练步数、随机种子、基线参数均按计划执行；未修改奖励、通信、MASAC、Replay Buffer 或基线算法。
+- 遗留问题：MASAC 在固定单种子训练中性能明显低于规则基线，且训练干预率为 1.0，需要诊断奖励贡献、策略饱和和训练稳定性。
 - 下一建议任务：3G-R3——训练稳定性和奖励贡献诊断。
