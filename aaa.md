@@ -1,22 +1,25 @@
 # 本次执行结果
 
-- 阶段：3H-A
-- 任务：奖励一致性与动态场景诊断
+- 阶段：3G-R1
+- 类型：阶段 3G 验收修复，不新增总计划阶段
+- 任务：奖励一致性与动态场景诊断汇总修复
 - 完成状态：已完成并验证
-- 修改和新增文件：AGENTS.md、README.md、src/uav_multi_relay/config.py、src/uav_multi_relay/environment.py、src/uav_multi_relay/__init__.py、src/uav_multi_relay/analysis/__init__.py、src/uav_multi_relay/analysis/diagnostics.py、scripts/diagnose_scenarios.py、tests/test_diagnostics.py、aaa.md
-- 运动代价修复：motion_cost 仅使用 `new_states[1:-1]` 与 `old_states[1:-1]` 的中继速度/加速度，不再计入 H/L。
-- 奖励权重实现：新增不可变 `RewardWeights`，rate 必须为正，其余权重为有限非负值；默认全为 1.0，保持原奖励尺度；`reward_terms` 保存原始分量并新增 `weighted_reward`。
-- 完整测试结果：`python -m pytest -q` 通过，134 passed；仅有既有 `.pytest_cache` 路径的 PytestCacheWarning。
+- 修改文件：AGENTS.md、src/uav_multi_relay/analysis/diagnostics.py、tests/test_diagnostics.py、aaa.md
+- 运动代价修复状态：保持仅统计中继速度/加速度；静止中继且 H/L 运动时 motion_cost=0，明确非零中继动作时 motion_cost>0。
+- 奖励权重状态：RewardWeights 默认全为 1.0；weighted_reward 与环境返回 reward 一致，失败奖励使用 failure 权重。
+- 诊断汇总修复：新增并正确区分 `mean_episode_min_rate_e2e_bps`、跨全部 episode 的 `minimum_rate_e2e_bps`，以及 H/L 的 mean/max displacement；删除未使用变量并使用 `dataclasses.replace()` 构造场景配置。
+- 完整测试结果：`python -m pytest -q` 通过，135 passed；仅有既有 `.pytest_cache` 路径的 PytestCacheWarning。
 - 编译验证：`python -m compileall -q src tests scripts` 成功。
-- 诊断矩阵：4 个 waypoint 半径（30/60/90/120）× 2 个 max_steps（100/250）× 2 个策略 × 5 episodes，共 80 episodes、16 个场景汇总；输出 JSON 已验证后删除。
-- 场景终止率：仅 waypoint_radius=120 的 stationary 在 max_steps=100 和 250 出现终止，均为 0.4；其余场景终止率为 0.0。
-- 静止与等距速率比较：全矩阵平均 return stationary=685.221059737079，equal_spacing=607.38398288923；未进行调参或筛选。
-- 奖励分量诊断：默认 stationary 的 motion_cost 为 0；equal_spacing 的 motion_cost 与 intervention_cost 明显非零；所有汇总值有限。
-- 诊断输出位置：`scenario_diagnostics.json`（临时生成，已删除，未提交）。
-- 代码 Commit ID：00033b3
+- 诊断矩阵：4 个 waypoint 半径 × 2 个 max_steps × 2 个策略 × 5 episodes，共 80 episodes、16 个场景汇总；JSON 已验证后删除。
+- 静止策略平均 return：685.221059737079；等距策略平均 return：607.38398288923。
+- 各场景终止率：仅 radius=120 的 stationary 在 max_steps=100/250 为 0.4，其余场景为 0.0。
+- 平均 episode 最低速率：stationary=42124469.789036，equal_spacing=42587479.4890522 bps；全局最低速率：stationary=40330783.5190918，equal_spacing=40528617.9896538 bps。
+- H/L 最大位移：两策略全矩阵 H 最大 141.876707038188 m、L 最大 143.094933523169 m。
+- 平均运动成本/干预成本：stationary motion=0、intervention=0；equal_spacing motion=0.21198562596123、intervention=0.615839262627857。
+- 代码 Commit ID：924b440
 - 当前分支：main
 - GitHub 推送结果：代码提交已成功推送至 `origin/main`。
 - Git 异常：无；未发生 `git.exe` 内存读取错误。
 - 计划偏差：无。
 - 遗留问题：尚未确定最终训练场景和奖励权重，未进行 MASAC 调参或长时间训练。
-- 下一建议阶段：3H-B——确定训练场景与奖励权重后重新训练 MASAC
+- 下一建议任务：3G-R2——确定训练场景与奖励权重后重新训练和比较
