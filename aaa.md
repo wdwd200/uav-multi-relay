@@ -1,25 +1,35 @@
 # 本次执行结果
 
-- 阶段：3G-R1
+- 阶段：3G-R2
 - 类型：阶段 3G 验收修复，不新增总计划阶段
-- 任务：奖励一致性与动态场景诊断汇总修复
-- 完成状态：已完成并验证
-- 修改文件：AGENTS.md、src/uav_multi_relay/analysis/diagnostics.py、tests/test_diagnostics.py、aaa.md
-- 运动代价修复状态：保持仅统计中继速度/加速度；静止中继且 H/L 运动时 motion_cost=0，明确非零中继动作时 motion_cost>0。
-- 奖励权重状态：RewardWeights 默认全为 1.0；weighted_reward 与环境返回 reward 一致，失败奖励使用 failure 权重。
-- 诊断汇总修复：新增并正确区分 `mean_episode_min_rate_e2e_bps`、跨全部 episode 的 `minimum_rate_e2e_bps`，以及 H/L 的 mean/max displacement；删除未使用变量并使用 `dataclasses.replace()` 构造场景配置。
-- 完整测试结果：`python -m pytest -q` 通过，135 passed；仅有既有 `.pytest_cache` 路径的 PytestCacheWarning。
+- 任务：固定场景重新训练与基线比较
+- 完成状态：未通过。规定的 20,000 步训练和完整 10-episode 七策略比较均因同一既有浮点边界错误中止。
+- 固定场景：K=4；H/L waypoint radius=90 m；max_steps=250；dt=现有默认值 0.2 s。
+- 奖励权重：rate=1.0，link=1.0，separation=1.0，intervention=0.1，motion=0.1，failure=1.0。
+- 训练步数：按规定请求 20,000 步；实际完成 8,253 步后失败。异常为 `ValueError: current_velocity_mps must satisfy the configured speed limits`。
+- 最佳评估步数：2,500；最佳 checkpoint 元数据为 environment_steps=2,500、updates=501、completed_episodes=18；该次评估 mean return=206.8078222273889。
+- 完整测试结果：`python -m pytest`，137 passed，1 个既有 PytestCacheWarning。
 - 编译验证：`python -m compileall -q src tests scripts` 成功。
-- 诊断矩阵：4 个 waypoint 半径 × 2 个 max_steps × 2 个策略 × 5 episodes，共 80 episodes、16 个场景汇总；JSON 已验证后删除。
-- 静止策略平均 return：685.221059737079；等距策略平均 return：607.38398288923。
-- 各场景终止率：仅 radius=120 的 stationary 在 max_steps=100/250 为 0.4，其余场景为 0.0。
-- 平均 episode 最低速率：stationary=42124469.789036，equal_spacing=42587479.4890522 bps；全局最低速率：stationary=40330783.5190918，equal_spacing=40528617.9896538 bps。
-- H/L 最大位移：两策略全矩阵 H 最大 141.876707038188 m、L 最大 143.094933523169 m。
-- 平均运动成本/干预成本：stationary motion=0、intervention=0；equal_spacing motion=0.21198562596123、intervention=0.615839262627857。
-- 代码 Commit ID：924b440
-- 当前分支：main
-- GitHub 推送结果：代码提交已成功推送至 `origin/main`。
+- 比较 episode 数：规定为 10；正式命令未完成。追踪显示 masac、random、stationary、equal_spacing、weighted_spacing 各完成 10/10；greedy 完成 4/10 后在 episode seed=20004 的第 14 步失败；mpc 尚未开始。
+- MASAC 平均 return：未生成正式 10-episode 结果。
+- Random 平均 return：未生成正式 10-episode 结果。
+- Stationary 平均 return：未生成正式 10-episode 结果。
+- Equal spacing 平均 return：未生成正式 10-episode 结果。
+- Weighted spacing 平均 return：未生成正式 10-episode 结果。
+- Greedy 平均 return：未生成正式 10-episode 结果。
+- MPC 平均 return：未运行。
+- 各策略平均端到端速率：未生成完整比较结果。
+- 各策略终止率：未生成完整比较结果。
+- 各策略安全干预率：未生成完整比较结果。
+- 各策略平均动作计算时间：未生成完整比较结果。
+- MASAC 相对 Stationary 的 return 提升：不计算，完整比较未完成。
+- MASAC 相对 Stationary 的速率提升：不计算，完整比较未完成。
+- 阶段 3G 是否通过：否，未满足判定规则；不延长训练、不更换随机种子、不修改场景或奖励权重。
+- 代码 Commit ID：381d4f4（`stage-3: configure dynamic MASAC baseline validation`）。
+- 当前分支：main。
+- GitHub 推送结果：代码提交 381d4f4 已推送至 `origin/main`；本结果文档待本次提交后推送。
 - Git 异常：无；未发生 `git.exe` 内存读取错误。
-- 计划偏差：无。
-- 遗留问题：尚未确定最终训练场景和奖励权重，未进行 MASAC 调参或长时间训练。
-- 下一建议任务：3G-R2——确定训练场景与奖励权重后重新训练和比较
+- 计划偏差：训练在第 8,253 步中止；比较在 greedy/seed=20004/第 14 步中止。未修改环境状态转移、通信模型、奖励公式、安全过滤器、MPC、Replay Buffer 或 MASAC 更新公式。
+- 根因记录：失败前某 relay 的水平速度平方和为 `900.0000000000001`，即 `30.000000000000004 m/s`；安全校验使用无容差的 `> 30` 判断，拒绝了该浮点舍入值。该问题在训练和 greedy 比较中均可稳定复现。
+- 遗留问题：需要后续阶段决定并修复速度边界的数值容差/状态不变量问题后，才能完成固定场景正式训练与公平比较。
+- 下一建议任务：3G-R3——训练稳定性和奖励贡献诊断。
