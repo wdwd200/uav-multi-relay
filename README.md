@@ -151,8 +151,9 @@ python scripts/diagnose_masac.py --run-dir masac_experiment \
 
 The diagnostic directory contains checkpoint evolution, policy diagnostics,
 reward contributions, failure summaries, and a Markdown/JSON summary. These are
-run artifacts and are not committed. The repository execution report is
-[`CODEX_EXECUTION_REPORT.md`](CODEX_EXECUTION_REPORT.md).
+run artifacts and are not committed. The current repository execution report is
+named for its stage and task; see
+[`STAGE_3G_R3_ACCEPTANCE_REPAIR_REPORT.md`](STAGE_3G_R3_ACCEPTANCE_REPAIR_REPORT.md).
 
 ## Policy Comparison
 
