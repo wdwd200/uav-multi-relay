@@ -138,6 +138,22 @@ logs, `best_checkpoint.pt`, `final_checkpoint.pt`, and `summary.json`. Existing
 non-empty directories are rejected. Periodic evaluations reuse fixed seeds for
 longitudinal comparison. Batch multi-seed experiments are not implemented.
 
+For a stability/action diagnostic run, add `--diagnostics --checkpoint-interval 2500`.
+This additionally writes interval action statistics, bounded per-failure traces,
+and `checkpoints/step_*.pt`. Diagnose the completed run without changing its
+training trajectory:
+
+```bash
+python scripts/diagnose_masac.py --run-dir masac_experiment \
+  --output-dir masac_experiment/diagnostics --evaluation-episodes 5 \
+  --evaluation-seed 10000 --comparison-episodes 10 --comparison-seed 20000
+```
+
+The diagnostic directory contains checkpoint evolution, policy diagnostics,
+reward contributions, failure summaries, and a Markdown/JSON summary. These are
+run artifacts and are not committed. The repository execution report is
+[`CODEX_EXECUTION_REPORT.md`](CODEX_EXECUTION_REPORT.md).
+
 ## Policy Comparison
 
 Compare a saved MASAC checkpoint with the random, stationary, equal-spacing,
