@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -39,6 +41,10 @@ def test_motion_cost_only_counts_controlled_relays_and_weighted_reward_matches()
     expected = 2.0 * raw["rate_reward"] - 0.5 * raw["link_cost"] - 1.5 * raw["separation_cost"] - 0.25 * raw["intervention_cost"] - 3.0 * raw["motion_cost"]
     assert weighted_reward == pytest.approx(expected)
     assert raw["weighted_reward"] == pytest.approx(expected)
+    moving_env = MultiRelayEnvironment(base)
+    moving_env.reset(seed=0)
+    _, _, _, _, moving_info = moving_env.step(np.ones((base.num_relays, 3)))
+    assert moving_info["reward_terms"]["motion_cost"] > 0.0
 
 
 def test_failure_reward_uses_failure_weight() -> None:
@@ -55,9 +61,10 @@ def test_failure_reward_uses_failure_weight() -> None:
     assert info["reward_terms"]["weighted_reward"] == pytest.approx(-3.5)
 
 
-def test_scenario_diagnostics_apply_radii_steps_seeds_and_finite_summaries() -> None:
+@pytest.mark.parametrize("num_relays", [1, 4])
+def test_scenario_diagnostics_apply_radii_steps_seeds_and_finite_summaries(num_relays: int) -> None:
     config = ScenarioDiagnosticConfig((30.0, 60.0), (2,), 2, 300, ("stationary", "equal_spacing"))
-    result = diagnose_scenarios(replace(default_environment_config(), num_relays=1), config)
+    result = diagnose_scenarios(replace(default_environment_config(), num_relays=num_relays), config)
     assert len(result.episode_results) == 8
     assert len(result.summaries) == 4
     assert {item.waypoint_radius_m for item in result.summaries} == {30.0, 60.0}
@@ -66,12 +73,19 @@ def test_scenario_diagnostics_apply_radii_steps_seeds_and_finite_summaries() -> 
     assert all(item.episode_length == 2 for item in result.episode_results)
     for summary in result.summaries:
         assert all(np.isfinite(value) for value in vars(summary).values() if isinstance(value, (int, float)))
+        members = [item for item in result.episode_results if item.waypoint_radius_m == summary.waypoint_radius_m and item.max_steps == summary.max_steps and item.policy == summary.policy]
+        assert summary.minimum_rate_e2e_bps == min(item.min_rate_e2e_bps for item in members)
+        assert summary.mean_episode_min_rate_e2e_bps == pytest.approx(np.mean([item.min_rate_e2e_bps for item in members]))
+        assert summary.maximum_high_displacement_m == max(item.max_high_displacement_m for item in members)
+        assert summary.maximum_low_displacement_m == max(item.max_low_displacement_m for item in members)
 
 
 def test_diagnostics_json_output_is_not_overwritten() -> None:
     with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
         path = Path(directory) / "diagnostics.json"
-        path.write_text("existing", encoding="utf-8")
-        assert json.loads('{"finite": 1}') == {"finite": 1}
-        # The CLI owns the overwrite guard; this keeps the fixture explicit.
-        assert path.read_text(encoding="utf-8") == "existing"
+        command = [sys.executable, "scripts/diagnose_scenarios.py", "--output", str(path), "--radii", "30", "--max-steps", "1", "--episodes", "1", "--seed", "0", "--policies", "stationary", "--num-relays", "1"]
+        completed = subprocess.run(command, check=True, capture_output=True, text=True)
+        assert json.loads(completed.stdout)["episodes"] == 1
+        assert "NaN" not in path.read_text(encoding="utf-8")
+        rejected = subprocess.run(command, capture_output=True, text=True)
+        assert rejected.returncode != 0

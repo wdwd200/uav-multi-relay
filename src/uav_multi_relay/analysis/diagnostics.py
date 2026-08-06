@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import copy
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, replace
 from numbers import Integral, Real
 
 import numpy as np
 
 from ..baselines import equal_spacing_actions, stationary_actions
-from ..config import EnvironmentConfig, EndpointTrajectoryConfig
+from ..config import EnvironmentConfig
 from ..environment import MultiRelayEnvironment
 
 
@@ -82,6 +81,7 @@ class ScenarioDiagnosticSummary:
     mean_return: float
     return_std: float
     mean_rate_e2e_bps: float
+    mean_episode_min_rate_e2e_bps: float
     minimum_rate_e2e_bps: float
     mean_rate_reward: float
     mean_link_cost: float
@@ -90,7 +90,9 @@ class ScenarioDiagnosticSummary:
     mean_motion_cost: float
     mean_intervention_rate: float
     mean_high_displacement_m: float
+    maximum_high_displacement_m: float
     mean_low_displacement_m: float
+    maximum_low_displacement_m: float
     mean_relay_path_length_m: float
     mean_min_hop_capacity_bps: float
     mean_max_hop_distance_m: float
@@ -105,21 +107,16 @@ class ScenarioDiagnosticResult:
 
 
 def _scenario_config(base: EnvironmentConfig, radius: float, max_steps: int) -> EnvironmentConfig:
-    high = EndpointTrajectoryConfig(base.high_trajectory.altitude_min_m, base.high_trajectory.altitude_max_m, radius, base.high_trajectory.waypoint_count, base.high_trajectory.arrival_tolerance_m)
-    low = EndpointTrajectoryConfig(base.low_trajectory.altitude_min_m, base.low_trajectory.altitude_max_m, radius, base.low_trajectory.waypoint_count, base.low_trajectory.arrival_tolerance_m)
-    return base.__class__(
-        base.num_relays, base.delta_t_s, max_steps, base.relay_motion_limits,
-        base.high_motion_limits, base.low_motion_limits, base.flight_bounds,
-        base.hard_safety_distance_m, base.soft_safety_distance_m,
-        base.hard_max_link_distance_m, base.rate_reference_bps, base.channel,
-        high, low, base.reward_weights,
+    return replace(
+        base,
+        max_steps=max_steps,
+        high_trajectory=replace(base.high_trajectory, waypoint_radius_m=radius),
+        low_trajectory=replace(base.low_trajectory, waypoint_radius_m=radius),
     )
 
 
 def _episode(env: MultiRelayEnvironment, policy: str, seed: int, radius: float, max_steps: int, episode_index: int) -> ScenarioEpisodeDiagnostic:
-    observation, _ = env.reset(seed=seed)
-    initial = np.asarray(observation["global"], dtype=float)
-    initial_positions = np.asarray(env.states, dtype=object)
+    env.reset(seed=seed)
     initial_high = env.high_state.position_m.copy()
     initial_low = env.low_state.position_m.copy()
     relay_path = 0.0
@@ -172,12 +169,25 @@ def _summary(radius: float, max_steps: int, policy: str, episodes: list[Scenario
     def mean(name: str) -> float:
         return float(np.mean([getattr(item, name) for item in episodes]))
     returns = np.asarray([item.episode_return for item in episodes], dtype=float)
-    values = [np.mean(returns), np.std(returns), *[mean(name) for name in ("mean_rate_e2e_bps", "min_rate_e2e_bps", "mean_rate_reward", "mean_link_cost", "mean_separation_cost", "mean_intervention_cost", "mean_motion_cost", "intervention_rate", "mean_high_displacement_m", "mean_low_displacement_m", "relay_path_length_m", "mean_min_hop_capacity_bps", "mean_max_hop_distance_m", "episode_length")]]
-    values.append(float(np.mean([item.terminated for item in episodes])))
+    mean_episode_min_rate = mean("min_rate_e2e_bps")
+    minimum_rate = float(np.min([item.min_rate_e2e_bps for item in episodes]))
+    maximum_high_displacement = float(np.max([item.max_high_displacement_m for item in episodes]))
+    maximum_low_displacement = float(np.max([item.max_low_displacement_m for item in episodes]))
+    values = [
+        float(np.mean(returns)), float(np.std(returns)), mean("mean_rate_e2e_bps"),
+        mean_episode_min_rate, minimum_rate, mean("mean_rate_reward"),
+        mean("mean_link_cost"), mean("mean_separation_cost"),
+        mean("mean_intervention_cost"), mean("mean_motion_cost"),
+        mean("intervention_rate"), mean("mean_high_displacement_m"),
+        maximum_high_displacement, mean("mean_low_displacement_m"),
+        maximum_low_displacement, mean("relay_path_length_m"),
+        mean("mean_min_hop_capacity_bps"), mean("mean_max_hop_distance_m"),
+        mean("episode_length"), float(np.mean([item.terminated for item in episodes])),
+    ]
     if not all(np.isfinite(value) for value in values):
         raise ValueError("scenario diagnostic summary must be finite")
     termination_rate = values[-1]
-    return ScenarioDiagnosticSummary(radius, max_steps, policy, len(episodes), termination_rate, values[0], values[1], *values[2:-1])
+    return ScenarioDiagnosticSummary(radius, max_steps, policy, len(episodes), termination_rate, *values[:-1])
 
 
 def diagnose_scenarios(base_config: EnvironmentConfig, config: ScenarioDiagnosticConfig) -> ScenarioDiagnosticResult:
@@ -189,7 +199,7 @@ def diagnose_scenarios(base_config: EnvironmentConfig, config: ScenarioDiagnosti
         for max_steps in config.max_steps_values:
             scenario = _scenario_config(base_config, radius, max_steps)
             for policy in config.policies:
-                episodes = [_episode(MultiRelayEnvironment(copy.deepcopy(scenario)), policy, int(config.seed + episode_index), radius, max_steps, episode_index) for episode_index in range(config.episodes)]
+                episodes = [_episode(MultiRelayEnvironment(scenario), policy, int(config.seed + episode_index), radius, max_steps, episode_index) for episode_index in range(config.episodes)]
                 episode_results.extend(episodes)
                 summaries.append(_summary(radius, max_steps, policy, episodes))
     return ScenarioDiagnosticResult(config, tuple(episode_results), tuple(summaries))
