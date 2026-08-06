@@ -21,6 +21,7 @@ from uav_multi_relay.training import MASACEvaluationConfig, evaluate_masac, load
 
 
 _TERMS = ("rate_reward", "link_cost", "separation_cost", "intervention_cost", "motion_cost", "failure_penalty", "weighted_reward")
+_UPDATE_FIELDS = ("actor_gradient_norm", "critic_gradient_norm", "critic_loss", "td_error_mean", "td_error_p95", "td_error_max", "q1_mean", "q2_mean", "target_q_mean", "alpha")
 
 
 def _finite(value: object, field: str) -> None:
@@ -45,6 +46,35 @@ def _write_jsonl(path: Path, values: list[dict[str, object]]) -> None:
         for value in values:
             _finite(value, path.name)
             handle.write(json.dumps(value, allow_nan=False, separators=(",", ":")) + "\n")
+
+
+def _update_scale_summary(training_metrics: list[dict[str, object]]) -> dict[str, dict[str, object]]:
+    """Summarize existing update logs without changing the original run artifacts."""
+    summary: dict[str, dict[str, object]] = {}
+    for field in _UPDATE_FIELDS:
+        values: list[tuple[int, float]] = []
+        for item in training_metrics:
+            if field not in item:
+                raise ValueError(f"training_metrics.jsonl is missing {field}")
+            value = item[field]
+            if value is not None:
+                numeric = float(value)
+                if not math.isfinite(numeric):
+                    raise ValueError(f"training_metrics.jsonl has non-finite {field}")
+                values.append((int(item["environment_steps"]), numeric))
+        if not values:
+            raise ValueError(f"training_metrics.jsonl has no valid {field}")
+        maximum_step, maximum_value = max(values, key=lambda item: item[1])
+        series = np.asarray([item[1] for item in values], dtype=float)
+        summary[field] = {
+            "first_step": values[0][0], "first_value": values[0][1],
+            "max_step": maximum_step, "max_value": maximum_value,
+            "last_step": values[-1][0], "last_value": values[-1][1],
+            "all_finite": True,
+            "monotonic_non_decreasing": bool(np.all(np.diff(series) >= 0.0)),
+            "single_point_spike": bool(maximum_value > 2.0 * float(np.median(series))),
+        }
+    return summary
 
 
 def _environment(run_config: dict[str, object]) -> MultiRelayEnvironment:
@@ -144,7 +174,7 @@ def _run_policy(env: MultiRelayEnvironment, agent: object, policy: str, episodes
         "terminal_hop_distance_max_mean": float(np.mean(terminal_hops)) if terminal_hops else 0.0, "terminal_relay_velocity_max_mean": float(np.mean(terminal_velocities)) if terminal_velocities else 0.0,
     }
     if detailed and policy == "masac":
-        diagnostics.update({"actor_mean_abs_mean": float(np.mean(actor_means)), "actor_deterministic_saturation_rate": float(np.mean(actor_saturation)), "actor_log_std_mean": float(np.mean(log_stds)), "actor_log_std_min": float(np.min(log_stds)), "actor_log_std_max": float(np.max(log_stds)), "replay_applied_action_q_mean": float(np.mean(replay_q)), "actor_raw_action_q_mean": float(np.mean(actor_q)), "actor_raw_minus_replay_q_mean": float(np.mean(np.asarray(actor_q) - np.asarray(replay_q))), "q1_mean": float(np.mean(q1)), "q1_std": float(np.std(q1)), "q2_mean": float(np.mean(q2)), "q2_std": float(np.std(q2)), "q_gap_mean": float(np.mean(np.abs(np.asarray(q1) - np.asarray(q2))))})
+        diagnostics.update({"actor_mean_abs_mean": float(np.mean(actor_means)), "actor_deterministic_saturation_rate": float(np.mean(actor_saturation)), "actor_log_std_mean": float(np.mean(log_stds)), "actor_log_std_min": float(np.min(log_stds)), "actor_log_std_max": float(np.max(log_stds)), "evaluation_applied_action_q_mean": float(np.mean(replay_q)), "actor_raw_action_q_mean": float(np.mean(actor_q)), "actor_raw_minus_evaluation_applied_q_mean": float(np.mean(np.asarray(actor_q) - np.asarray(replay_q))), "q1_mean": float(np.mean(q1)), "q1_std": float(np.std(q1)), "q2_mean": float(np.mean(q2)), "q2_std": float(np.std(q2)), "q_gap_mean": float(np.mean(np.abs(np.asarray(q1) - np.asarray(q2))))})
     _finite(diagnostics, "policy diagnostics")
     return results, diagnostics
 
@@ -177,19 +207,23 @@ def main() -> None:
         episodes, diagnostics = _run_policy(env, final_agent, policy, args.comparison_episodes, args.comparison_seed, detailed=False)
         reward_data[policy] = _contributions(episodes, weights); failure_data[policy] = {key: value for key, value in diagnostics.items() if key.startswith("failure_") or key.startswith("terminal_")}
     _write_json(output / "reward_contributions.json", reward_data); _write_json(output / "failure_summary.json", failure_data)
-    training_metrics = [json.loads(line) for line in (run_dir / "training_metrics.jsonl").read_text(encoding="utf-8").splitlines() if line]
+    training_log = run_dir / "training_metrics.jsonl"
+    if not training_log.is_file():
+        raise ValueError("training_metrics.jsonl does not exist")
+    training_metrics = [json.loads(line) for line in training_log.read_text(encoding="utf-8").splitlines() if line]
+    update_scale = _update_scale_summary(training_metrics)
     final_policy = detailed[-1]; final_rewards = dict(reward_data["masac"])
     answers = {
         "requested_action_long_term_saturation": final_policy["requested_action_saturation_rate"] >= .1,
         "actor_log_std_at_bound": final_policy["log_std_at_bound"], "alpha_at_numeric_clamp": final_policy["alpha_at_clamp"],
         "critic_metrics_finite": all(all(math.isfinite(float(item[name])) for name in ("critic_loss", "q1_mean", "q2_mean", "td_error_mean")) for item in training_metrics if item["critic_loss"] is not None),
-        "actor_q_extrapolation_supported": final_policy["actor_raw_minus_replay_q_mean"] > max(.1, abs(final_policy["replay_applied_action_q_mean"]) * .1),
+        "final_evaluation_actor_q_gap_significant": final_policy["actor_raw_minus_evaluation_applied_q_mean"] > max(.1, abs(final_policy["evaluation_applied_action_q_mean"]) * .1),
         "late_action_mismatch_near_100_percent": final_policy["action_mismatch_event_rate"] >= .95,
         "safety_scale_long_term_below_one": final_policy["safety_scale_lt_one_rate"] >= .5,
         "failure_penalty_vs_episode_positive_rate": abs(final_rewards["signed_weighted_total"]["failure"]) / max(final_rewards["signed_weighted_total"]["rate"], 1e-9),
         "episode_length_gap": {policy: reward_data[policy]["mean_episode_length"] for policy in reward_data},
     }
-    summary = {"checkpoint_evolution": evolution, "final_policy": final_policy, "reward_contributions": reward_data, "failure_summary": failure_data, "answers": answers}
+    summary = {"checkpoint_evolution": evolution, "final_policy": final_policy, "reward_contributions": reward_data, "failure_summary": failure_data, "update_scale": update_scale, "answers": answers}
     _write_json(output / "diagnostic_summary.json", summary)
     markdown = """# MASAC diagnostic summary
 
@@ -198,8 +232,8 @@ def main() -> None:
 1. Requested actions are not persistently saturated: final deterministic saturation is {saturation:.3f}.
 2. Actor log_std is not near bounds: [{log_min:.3f}, {log_max:.3f}] versus [-20, 2].
 3. Alpha declined from {alpha0:.3f} to a minimum checkpoint value {alpha_min:.3f} then recovered to {alpha_final:.3f}; it did not reach its numeric clamp.
-4. Critic values, TD errors, losses, and gradient norms stay finite but their scale grows markedly, so the critic update is not scale-stable.
-5. No material final Critic extrapolation is observed: Actor raw-action Q minus replay applied-action Q is {q_delta:.6f}.
+4. Critic values, TD errors, losses, and gradient norms stay finite, while loss and TD-error scale increases late in training; this is a high-priority update-scale concern, not proof of the termination root cause.
+5. At final deterministic evaluation states, Actor raw-action Q minus current evaluation safety-filtered applied-action Q is {q_delta:.6f}; this does not rule out Critic extrapolation during training or outside the Replay Buffer distribution.
 6. Requested/applied mismatch remains pervasive: training interval event rate is 1.0 and final deterministic evaluation is {mismatch:.3f}.
 7. Safety scale is not broadly below one (mean {scale_mean:.3f}, <1 rate {scale_lt_one:.3f}), but every terminal failure has scale 0.
 8. MASAC failures are all `no interpolated relay velocity satisfies the hard constraints`.
@@ -208,11 +242,17 @@ def main() -> None:
 11. Episode length dominates total return: MASAC/Random/Stationary lengths are {masac_length:.1f}/{random_length:.1f}/{stationary_length:.1f}, whereas returns per step are {masac_rps:.3f}/{random_rps:.3f}/{stationary_rps:.3f}.
 12. MASAC per-step reward terms are rate {rate:.3f}, intervention cost {intervention:.3f}, motion cost {motion:.3f}, and failure penalty {failure:.3f}.
 13. Yes. The failure contribution is only {failure_ratio:.4%} of cumulative positive rate contribution.
-14. The data confirms an action-semantic mismatch, but does not confirm Critic overvaluation of raw actions as its primary numerical mechanism.
-15. The next controlled repair should target MASAC numerical stability/update scale; do not change reward, safety, or action semantics in this diagnostic stage.
+14. The data observes an action-semantic mismatch, but does not establish that it is the primary cause of Critic behavior or failure.
+15. The evidence does not yet fix a 3G-R4 algorithm modification; any next repair must be selected from the completed acceptance evidence.
+
+## Update-scale trajectory from existing training log
+
+- Actor gradient: first {actor_first:.6f} (step {actor_first_step}), max {actor_max:.6f} (step {actor_max_step}), last {actor_last:.6f} (step {actor_last_step}); all finite={actor_finite}, monotonic non-decreasing={actor_monotonic}, single-point spike={actor_spike}.
+- Critic gradient: first {critic_first:.6f} (step {critic_first_step}), max {critic_max:.6f} (step {critic_max_step}), last {critic_last:.6f} (step {critic_last_step}); all finite={critic_finite}, monotonic non-decreasing={critic_monotonic}, single-point spike={critic_spike}.
+- Complete first/max/last, finite, monotonic, and spike summaries for critic loss, TD error, Q1, Q2, target Q, and alpha are recorded in `diagnostic_summary.json:update_scale`.
 """.format(
         saturation=final_policy["requested_action_saturation_rate"], log_min=final_policy["actor_log_std_min"], log_max=final_policy["actor_log_std_max"],
-        alpha0=evolution[0]["alpha"], alpha_min=min(item["alpha"] for item in evolution), alpha_final=final_policy["alpha"], q_delta=final_policy["actor_raw_minus_replay_q_mean"],
+        alpha0=evolution[0]["alpha"], alpha_min=min(item["alpha"] for item in evolution), alpha_final=final_policy["alpha"], q_delta=final_policy["actor_raw_minus_evaluation_applied_q_mean"],
         mismatch=final_policy["action_mismatch_event_rate"], scale_mean=final_policy["safety_scale_mean"], scale_lt_one=final_policy["safety_scale_lt_one_rate"],
         failure_step=failure_data["masac"]["failure_reason_mean_step"].get("no interpolated relay velocity satisfies the hard constraints", 0.0), hop=failure_data["masac"]["terminal_hop_distance_max_mean"],
         velocity=failure_data["masac"]["terminal_relay_velocity_max_mean"], terminal_mismatch=failure_data["masac"]["terminal_action_mismatch_mean"],
@@ -220,6 +260,8 @@ def main() -> None:
         masac_rps=reward_data["masac"]["mean_return_per_step"], random_rps=reward_data["random"]["mean_return_per_step"], stationary_rps=reward_data["stationary"]["mean_return_per_step"],
         rate=reward_data["masac"]["raw_per_step"]["rate_reward"], intervention=reward_data["masac"]["raw_per_step"]["intervention_cost"], motion=reward_data["masac"]["raw_per_step"]["motion_cost"],
         failure=reward_data["masac"]["raw_per_step"]["failure_penalty"], failure_ratio=answers["failure_penalty_vs_episode_positive_rate"],
+        actor_first=update_scale["actor_gradient_norm"]["first_value"], actor_first_step=update_scale["actor_gradient_norm"]["first_step"], actor_max=update_scale["actor_gradient_norm"]["max_value"], actor_max_step=update_scale["actor_gradient_norm"]["max_step"], actor_last=update_scale["actor_gradient_norm"]["last_value"], actor_last_step=update_scale["actor_gradient_norm"]["last_step"], actor_finite=update_scale["actor_gradient_norm"]["all_finite"], actor_monotonic=update_scale["actor_gradient_norm"]["monotonic_non_decreasing"], actor_spike=update_scale["actor_gradient_norm"]["single_point_spike"],
+        critic_first=update_scale["critic_gradient_norm"]["first_value"], critic_first_step=update_scale["critic_gradient_norm"]["first_step"], critic_max=update_scale["critic_gradient_norm"]["max_value"], critic_max_step=update_scale["critic_gradient_norm"]["max_step"], critic_last=update_scale["critic_gradient_norm"]["last_value"], critic_last_step=update_scale["critic_gradient_norm"]["last_step"], critic_finite=update_scale["critic_gradient_norm"]["all_finite"], critic_monotonic=update_scale["critic_gradient_norm"]["monotonic_non_decreasing"], critic_spike=update_scale["critic_gradient_norm"]["single_point_spike"],
     )
     (output / "diagnostic_summary.md").write_text(markdown, encoding="utf-8")
 
