@@ -124,7 +124,7 @@ def _run_policy(env: MultiRelayEnvironment, agent: object, policy: str, episodes
     results: list[dict[str, object]] = []
     requested_abs: list[float] = []; applied_abs: list[float] = []; mismatch: list[float] = []; scales: list[float] = []
     actor_means: list[float] = []; log_stds: list[float] = []; actor_saturation: list[float] = []
-    replay_q: list[float] = []; actor_q: list[float] = []; q1: list[float] = []; q2: list[float] = []
+    evaluation_applied_q: list[float] = []; actor_q: list[float] = []; q1: list[float] = []; q2: list[float] = []
     failure_reasons: Counter[str] = Counter(); failure_steps: defaultdict[str, list[int]] = defaultdict(list)
     terminal_scales: list[float] = []; terminal_mismatch: list[float] = []; terminal_hops: list[float] = []; terminal_velocities: list[float] = []
     for episode_index in range(episodes):
@@ -155,7 +155,7 @@ def _run_policy(env: MultiRelayEnvironment, agent: object, policy: str, episodes
                     q1_actor, q2_actor = agent.critic(state, raw_action)
                 actor_means.extend(torch.abs(mean).cpu().reshape(-1).tolist()); log_stds.extend(log_std.cpu().reshape(-1).tolist())
                 actor_saturation.extend((torch.abs(raw_action) >= 0.95).float().cpu().reshape(-1).tolist())
-                replay_q.append(float(torch.minimum(q1_replay, q2_replay).item())); actor_q.append(float(torch.minimum(q1_actor, q2_actor).item())); q1.append(float(q1_actor.item())); q2.append(float(q2_actor.item()))
+                evaluation_applied_q.append(float(torch.minimum(q1_replay, q2_replay).item())); actor_q.append(float(torch.minimum(q1_actor, q2_actor).item())); q1.append(float(q1_actor.item())); q2.append(float(q2_actor.item()))
             terms = {name: float(dict(info["reward_terms"])[name]) for name in _TERMS}
             reward_terms.append(terms); episode_return += float(reward); rates.append(float(info["rate_e2e_bps"])); length += 1
             if terminated:
@@ -174,7 +174,7 @@ def _run_policy(env: MultiRelayEnvironment, agent: object, policy: str, episodes
         "terminal_hop_distance_max_mean": float(np.mean(terminal_hops)) if terminal_hops else 0.0, "terminal_relay_velocity_max_mean": float(np.mean(terminal_velocities)) if terminal_velocities else 0.0,
     }
     if detailed and policy == "masac":
-        diagnostics.update({"actor_mean_abs_mean": float(np.mean(actor_means)), "actor_deterministic_saturation_rate": float(np.mean(actor_saturation)), "actor_log_std_mean": float(np.mean(log_stds)), "actor_log_std_min": float(np.min(log_stds)), "actor_log_std_max": float(np.max(log_stds)), "evaluation_applied_action_q_mean": float(np.mean(replay_q)), "actor_raw_action_q_mean": float(np.mean(actor_q)), "actor_raw_minus_evaluation_applied_q_mean": float(np.mean(np.asarray(actor_q) - np.asarray(replay_q))), "q1_mean": float(np.mean(q1)), "q1_std": float(np.std(q1)), "q2_mean": float(np.mean(q2)), "q2_std": float(np.std(q2)), "q_gap_mean": float(np.mean(np.abs(np.asarray(q1) - np.asarray(q2))))})
+        diagnostics.update({"actor_mean_abs_mean": float(np.mean(actor_means)), "actor_deterministic_saturation_rate": float(np.mean(actor_saturation)), "actor_log_std_mean": float(np.mean(log_stds)), "actor_log_std_min": float(np.min(log_stds)), "actor_log_std_max": float(np.max(log_stds)), "evaluation_applied_action_q_mean": float(np.mean(evaluation_applied_q)), "actor_raw_action_q_mean": float(np.mean(actor_q)), "actor_raw_minus_evaluation_applied_q_mean": float(np.mean(np.asarray(actor_q) - np.asarray(evaluation_applied_q))), "q1_mean": float(np.mean(q1)), "q1_std": float(np.std(q1)), "q2_mean": float(np.mean(q2)), "q2_std": float(np.std(q2)), "q_gap_mean": float(np.mean(np.abs(np.asarray(q1) - np.asarray(q2))))})
     _finite(diagnostics, "policy diagnostics")
     return results, diagnostics
 
