@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -255,3 +255,31 @@ def default_environment_config() -> EnvironmentConfig:
         low_trajectory=_default_low_trajectory(),
         reward_weights=RewardWeights(),
     )
+
+
+def scenario_environment_config(
+    base_config: EnvironmentConfig,
+    *,
+    num_relays: int | None = None,
+    waypoint_radius_m: float | None = None,
+    max_steps: int | None = None,
+    reward_weights: RewardWeights | None = None,
+) -> EnvironmentConfig:
+    """Return a validated config with shared training/comparison overrides."""
+    if not isinstance(base_config, EnvironmentConfig):
+        raise ValueError("base_config must be an EnvironmentConfig")
+    updates: dict[str, object] = {}
+    if num_relays is not None:
+        updates["num_relays"] = num_relays
+    if max_steps is not None:
+        updates["max_steps"] = max_steps
+    if reward_weights is not None:
+        updates["reward_weights"] = reward_weights
+    if waypoint_radius_m is not None:
+        updates["high_trajectory"] = replace(
+            base_config.high_trajectory, waypoint_radius_m=waypoint_radius_m
+        )
+        updates["low_trajectory"] = replace(
+            base_config.low_trajectory, waypoint_radius_m=waypoint_radius_m
+        )
+    return replace(base_config, **updates)

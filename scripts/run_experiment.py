@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -13,7 +12,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from uav_multi_relay import MultiRelayEnvironment
+from uav_multi_relay import MultiRelayEnvironment, RewardWeights, scenario_environment_config
 from uav_multi_relay.learning import MultiAgentReplayBuffer, ParameterSharingMASAC
 from uav_multi_relay.training import MASACExperimentConfig, MASACTrainingConfig, run_masac_experiment
 
@@ -25,6 +24,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-relays", type=int, default=4)
     parser.add_argument("--max-steps", type=int)
+    parser.add_argument("--waypoint-radius", type=float, default=30.0)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--random-action-steps", type=int, default=1_000)
     parser.add_argument("--update-after-steps", type=int, default=1_000)
@@ -34,14 +34,26 @@ def main() -> None:
     parser.add_argument("--evaluation-episodes", type=int, default=10)
     parser.add_argument("--evaluation-seed", type=int, default=10_000)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--reward-rate", type=float, default=1.0)
+    parser.add_argument("--reward-link", type=float, default=1.0)
+    parser.add_argument("--reward-separation", type=float, default=1.0)
+    parser.add_argument("--reward-intervention", type=float, default=1.0)
+    parser.add_argument("--reward-motion", type=float, default=1.0)
+    parser.add_argument("--reward-failure", type=float, default=1.0)
     args = parser.parse_args()
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     base = MultiRelayEnvironment()
-    environment_config = replace(
+    reward_weights = RewardWeights(
+        args.reward_rate, args.reward_link, args.reward_separation,
+        args.reward_intervention, args.reward_motion, args.reward_failure,
+    )
+    environment_config = scenario_environment_config(
         base.config,
         num_relays=args.num_relays,
-        **({"max_steps": args.max_steps} if args.max_steps is not None else {}),
+        waypoint_radius_m=args.waypoint_radius,
+        max_steps=args.max_steps,
+        reward_weights=reward_weights,
     )
     training_env = MultiRelayEnvironment(environment_config)
     evaluation_env = MultiRelayEnvironment(environment_config)
@@ -53,6 +65,16 @@ def main() -> None:
     training_config = MASACTrainingConfig(args.steps, replay.capacity, args.batch_size, args.random_action_steps, args.update_after_steps, args.updates_per_step, args.seed)
     experiment_config = MASACExperimentConfig(args.output_dir, args.log_interval, args.evaluation_interval, args.evaluation_episodes, args.evaluation_seed)
     result = run_masac_experiment(training_env, evaluation_env, agent, replay, training_config, experiment_config)
+    run_config = json.loads(result.output_directory.joinpath("run_config.json").read_text(encoding="utf-8"))
+    run_config["environment_config"] = {
+        "num_relays": environment_config.num_relays,
+        "waypoint_radius_m": args.waypoint_radius,
+        "max_steps": environment_config.max_steps,
+        "reward_weights": vars(reward_weights),
+    }
+    result.output_directory.joinpath("run_config.json").write_text(
+        json.dumps(run_config, allow_nan=False, indent=2), encoding="utf-8"
+    )
     print(json.dumps({
         "output_directory": str(result.output_directory),
         "final_checkpoint": str(result.final_checkpoint),

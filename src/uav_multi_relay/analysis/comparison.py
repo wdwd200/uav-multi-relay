@@ -9,20 +9,25 @@ from numbers import Integral
 
 import numpy as np
 
-from ..baselines import equal_spacing_actions, greedy_one_step_actions, stationary_actions
+from ..baselines import (
+    equal_spacing_actions,
+    greedy_one_step_actions,
+    stationary_actions,
+    weighted_spacing_actions,
+)
 from ..environment import MultiRelayEnvironment
 from ..learning import ParameterSharingMASAC
 from ..policies import MPCConfig, mpc_actions
 
 
-_VALID_POLICIES = frozenset({"masac", "random", "stationary", "equal_spacing", "greedy", "mpc"})
+_VALID_POLICIES = frozenset({"masac", "random", "stationary", "equal_spacing", "weighted_spacing", "greedy", "mpc"})
 
 
 @dataclass(frozen=True)
 class PolicyComparisonConfig:
     episodes: int = 5
     seed: int = 20_000
-    policies: tuple[str, ...] = ("masac", "random", "stationary", "equal_spacing", "greedy", "mpc")
+    policies: tuple[str, ...] = ("masac", "random", "stationary", "equal_spacing", "weighted_spacing", "greedy", "mpc")
     greedy_sweeps: int = 1
     mpc_config: MPCConfig = MPCConfig(horizon=2, population_size=8, iterations=2, elite_fraction=0.5)
 
@@ -95,6 +100,8 @@ def _action(
         return stationary_actions(env)
     if policy == "equal_spacing":
         return equal_spacing_actions(env)
+    if policy == "weighted_spacing":
+        return weighted_spacing_actions(env)
     if policy == "greedy":
         return greedy_one_step_actions(env, sweeps=int(config.greedy_sweeps))
     return mpc_actions(
