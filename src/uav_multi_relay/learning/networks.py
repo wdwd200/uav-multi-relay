@@ -122,6 +122,30 @@ class SharedGaussianActor(nn.Module):
         return per_relay, per_relay_entropy, joint
 
 
+class SharedDeterministicActor(nn.Module):
+    """One tanh-bounded deterministic policy shared by every relay."""
+
+    def __init__(self, local_observation_dim: int = 23, action_dim: int = 3,
+                 hidden_dims: Sequence[int] = (256, 256)) -> None:
+        super().__init__()
+        if local_observation_dim <= 0 or action_dim <= 0:
+            raise ValueError("observation and action dimensions must be positive")
+        self.local_observation_dim = int(local_observation_dim)
+        self.action_dim = int(action_dim)
+        self.hidden_dims = _validate_hidden_dims(hidden_dims)
+        self.network = _mlp(self.local_observation_dim, self.hidden_dims, self.action_dim)
+
+    def forward(self, local_observations: Tensor) -> Tensor:
+        observations = _finite_tensor(local_observations, "local_observations")
+        if observations.ndim != 3 or observations.shape[-1] != self.local_observation_dim:
+            raise ValueError("local_observations must have shape (batch, num_relays, local_observation_dim)")
+        observations = observations.to(dtype=self.network[0].weight.dtype, device=self.network[0].weight.device)
+        actions = torch.tanh(self.network(observations))
+        if not torch.isfinite(actions).all():
+            raise ValueError("deterministic actor output is non-finite")
+        return actions
+
+
 class CentralizedValueCritic(nn.Module):
     """One value estimate from the centralized global state."""
 
@@ -185,3 +209,31 @@ class CentralizedTwinCritic(nn.Module):
         if not torch.isfinite(q1).all() or not torch.isfinite(q2).all():
             raise ValueError("critic output is non-finite")
         return q1, q2
+
+
+class CentralizedCritic(nn.Module):
+    """One Q network over a centralized state and flattened joint action."""
+
+    def __init__(self, global_state_dim: int, num_relays: int, action_dim: int = 3,
+                 hidden_dims: Sequence[int] = (256, 256)) -> None:
+        super().__init__()
+        if global_state_dim <= 0 or num_relays <= 0 or action_dim <= 0:
+            raise ValueError("state, relay, and action dimensions must be positive")
+        self.global_state_dim = int(global_state_dim)
+        self.num_relays = int(num_relays)
+        self.action_dim = int(action_dim)
+        self.hidden_dims = _validate_hidden_dims(hidden_dims)
+        self.q_net = _mlp(self.global_state_dim + self.num_relays * self.action_dim, self.hidden_dims, 1)
+
+    def forward(self, global_state: Tensor, joint_actions: Tensor) -> Tensor:
+        state = _finite_tensor(global_state, "global_state")
+        actions = _finite_tensor(joint_actions, "joint_actions")
+        if state.ndim != 2 or state.shape[-1] != self.global_state_dim:
+            raise ValueError("global_state must have shape (batch, global_state_dim)")
+        if actions.shape != (state.shape[0], self.num_relays, self.action_dim):
+            raise ValueError("joint_actions must have shape (batch, num_relays, action_dim)")
+        state = state.to(dtype=self.q_net[0].weight.dtype, device=self.q_net[0].weight.device)
+        value = self.q_net(torch.cat((state, actions.to(dtype=state.dtype, device=state.device).flatten(start_dim=1)), dim=-1))
+        if not torch.isfinite(value).all():
+            raise ValueError("critic output is non-finite")
+        return value

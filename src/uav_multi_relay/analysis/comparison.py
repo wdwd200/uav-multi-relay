@@ -16,11 +16,11 @@ from ..baselines import (
     weighted_spacing_actions,
 )
 from ..environment import MultiRelayEnvironment
-from ..learning import MAPPOAgent, ParameterSharingMASAC
+from ..learning import MAPPOAgent, ParameterSharingMADDPG, ParameterSharingMATD3, ParameterSharingMASAC
 from ..policies import MPCConfig, mpc_actions
 
 
-_VALID_POLICIES = frozenset({"mappo", "masac", "random", "stationary", "equal_spacing", "weighted_spacing", "greedy", "mpc"})
+_VALID_POLICIES = frozenset({"mappo", "masac", "matd3", "maddpg", "random", "stationary", "equal_spacing", "weighted_spacing", "greedy", "mpc"})
 
 
 @dataclass(frozen=True)
@@ -90,6 +90,8 @@ def _action(
     env: MultiRelayEnvironment,
     masac_agent: ParameterSharingMASAC | None,
     mappo_agent: MAPPOAgent | None,
+    matd3_agent: ParameterSharingMATD3 | None,
+    maddpg_agent: ParameterSharingMADDPG | None,
     local_observation: np.ndarray,
     random_generator: np.random.Generator,
     config: PolicyComparisonConfig,
@@ -104,6 +106,12 @@ def _action(
         if masac_agent is None:
             raise ValueError("MASAC policy was requested without a MASAC agent")
         return masac_agent.act(local_observation, deterministic=True)
+    if policy == "matd3":
+        if matd3_agent is None: raise ValueError("MATD3 policy was requested without a MATD3 agent")
+        return matd3_agent.act(local_observation, deterministic=True)
+    if policy == "maddpg":
+        if maddpg_agent is None: raise ValueError("MADDPG policy was requested without a MADDPG agent")
+        return maddpg_agent.act(local_observation, deterministic=True)
     if policy == "random":
         return random_generator.uniform(-1.0, 1.0, size=(env.config.num_relays, 3))
     if policy == "stationary":
@@ -141,6 +149,8 @@ def compare_policies(
     config: PolicyComparisonConfig,
     *,
     mappo_agent: MAPPOAgent | None = None,
+    matd3_agent: ParameterSharingMATD3 | None = None,
+    maddpg_agent: ParameterSharingMADDPG | None = None,
 ) -> PolicyComparisonResult:
     """Evaluate each selected policy on an identical seeded trajectory set."""
     if not isinstance(env, MultiRelayEnvironment):
@@ -152,6 +162,10 @@ def compare_policies(
             raise ValueError("MASAC policy requires a ParameterSharingMASAC agent")
         if env.config.num_relays != agent.num_relays:
             raise ValueError("MASAC agent and environment relay counts are incompatible")
+    for name, supplied, cls in (("mappo", mappo_agent, MAPPOAgent), ("matd3", matd3_agent, ParameterSharingMATD3), ("maddpg", maddpg_agent, ParameterSharingMADDPG)):
+        if name in config.policies:
+            if not isinstance(supplied, cls): raise ValueError(f"{name.upper()} policy requires a compatible agent")
+            if env.config.num_relays != supplied.num_relays: raise ValueError(f"{name.upper()} agent and environment relay counts are incompatible")
     if "mappo" in config.policies:
         if not isinstance(mappo_agent, MAPPOAgent):
             raise ValueError("MAPPO policy requires a MAPPOAgent")
@@ -168,8 +182,8 @@ def compare_policies(
             local = np.asarray(observation["local"], dtype=np.float32)
             if policy == "masac" and local.shape != (agent.num_relays, agent.local_observation_dim):
                 raise ValueError("MASAC agent and environment local observations are incompatible")
-            if policy == "mappo" and local.shape != (mappo_agent.num_relays, mappo_agent.local_observation_dim):
-                raise ValueError("MAPPO agent and environment local observations are incompatible")
+            for name, supplied in (("mappo",mappo_agent),("matd3",matd3_agent),("maddpg",maddpg_agent)):
+                if policy == name and local.shape != (supplied.num_relays, supplied.local_observation_dim): raise ValueError(f"{name.upper()} agent and environment local observations are incompatible")
             random_generator = np.random.default_rng(episode_seed)
             total_return = 0.0
             rates: list[float] = []
@@ -179,7 +193,7 @@ def compare_policies(
             terminated = truncated = False
             while not (terminated or truncated):
                 started = time.perf_counter()
-                action = _action(policy, evaluation_env, agent, mappo_agent, local, random_generator, config, episode_index, step_index)
+                action = _action(policy, evaluation_env, agent, mappo_agent, matd3_agent, maddpg_agent, local, random_generator, config, episode_index, step_index)
                 elapsed = time.perf_counter() - started
                 if not np.isfinite(elapsed) or elapsed < 0.0:
                     raise ValueError("action computation time must be finite and non-negative")
