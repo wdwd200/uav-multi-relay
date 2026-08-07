@@ -270,6 +270,7 @@ def _masac_batch(
     global_dim: int = 5,
     terminated: object = 0.0,
     truncated: object = 0.0,
+    rewards: torch.Tensor | None = None,
 ) -> ReplayBatch:
     terminated_tensor = torch.as_tensor(terminated, dtype=torch.float32)
     truncated_tensor = torch.as_tensor(truncated, dtype=torch.float32)
@@ -281,7 +282,7 @@ def _masac_batch(
         local_observations=torch.randn(batch_size, num_relays, local_dim),
         global_states=torch.randn(batch_size, global_dim),
         applied_actions=torch.tanh(torch.randn(batch_size, num_relays, 3)),
-        rewards=torch.randn(batch_size, 1),
+        rewards=torch.randn(batch_size, 1) if rewards is None else rewards,
         next_local_observations=torch.randn(batch_size, num_relays, local_dim),
         next_global_states=torch.randn(batch_size, global_dim),
         terminated=terminated_tensor,
@@ -364,6 +365,9 @@ def test_masac_update_supports_dynamic_relay_counts_and_returns_finite_metrics(
     assert all(np.isfinite(value) for value in vars(metrics).values())
     assert metrics.td_error_mean >= 0.0 and metrics.td_error_p95 >= 0.0 and metrics.td_error_max >= 0.0
     assert metrics.actor_gradient_norm >= 0.0 and metrics.critic_gradient_norm >= 0.0
+    assert metrics.critic_gradient_norm_pre_clip >= 0.0
+    assert metrics.critic_gradient_norm_post_clip >= 0.0
+    assert 0.0 <= metrics.critic_gradient_clip_applied <= 1.0
     assert 0.0 <= metrics.actor_action_saturation_rate <= 1.0
     assert metrics.actor_log_std_min <= metrics.actor_log_std_mean <= metrics.actor_log_std_max
     assert masac.alpha.item() > 0.0 and np.isfinite(masac.alpha.item())
@@ -384,14 +388,42 @@ def test_update_diagnostics_do_not_change_rng_or_optimization_result() -> None:
     for first_module, second_module in ((first.actor, second.actor), (first.critic, second.critic), (first.target_critic, second.target_critic)):
         assert all(torch.equal(left, right) for left, right in zip(first_module.parameters(), second_module.parameters()))
     assert torch.equal(first.log_alpha, second.log_alpha)
-    first_state = first.actor_optimizer.state_dict()
-    second_state = second.actor_optimizer.state_dict()
-    assert first_state["param_groups"] == second_state["param_groups"]
-    assert first_state["state"].keys() == second_state["state"].keys()
-    for key in first_state["state"]:
-        for name, value in first_state["state"][key].items():
-            other = second_state["state"][key][name]
-            assert torch.equal(value, other) if isinstance(value, torch.Tensor) else value == other
+    for first_optimizer, second_optimizer in (
+        (first.actor_optimizer, second.actor_optimizer),
+        (first.critic_optimizer, second.critic_optimizer),
+        (first.alpha_optimizer, second.alpha_optimizer),
+    ):
+        first_state = first_optimizer.state_dict()
+        second_state = second_optimizer.state_dict()
+        assert first_state["param_groups"] == second_state["param_groups"]
+        assert first_state["state"].keys() == second_state["state"].keys()
+        for key in first_state["state"]:
+            for name, value in first_state["state"][key].items():
+                other = second_state["state"][key][name]
+                assert torch.equal(value, other) if isinstance(value, torch.Tensor) else value == other
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf"), True])
+def test_masac_rejects_invalid_critic_gradient_clip_norm(value: object) -> None:
+    with pytest.raises(ValueError):
+        ParameterSharingMASAC(4, 5, 2, hidden_dims=(8, 8), critic_gradient_clip_norm=value)
+
+
+def test_critic_gradient_clipping_reports_pre_and_post_norms() -> None:
+    masac = ParameterSharingMASAC(4, 5, 2, hidden_dims=(8, 8), critic_gradient_clip_norm=1.0)
+    batch = _masac_batch(batch_size=8, rewards=torch.full((8, 1), 1_000.0))
+    metrics = masac.update(batch)
+    assert metrics.critic_gradient_norm_pre_clip > 1.0
+    assert metrics.critic_gradient_norm_post_clip <= 1.0 + 1e-5
+    assert metrics.critic_gradient_clip_applied == 1.0
+
+
+def test_critic_gradient_clipping_does_not_report_when_threshold_is_large() -> None:
+    masac = ParameterSharingMASAC(4, 5, 2, hidden_dims=(8, 8), critic_gradient_clip_norm=1e9)
+    metrics = masac.update(_masac_batch())
+    assert metrics.critic_gradient_norm_pre_clip <= 1e9
+    assert metrics.critic_gradient_norm_post_clip == pytest.approx(metrics.critic_gradient_norm_pre_clip)
+    assert metrics.critic_gradient_clip_applied == 0.0
 
 
 def test_masac_rejects_incompatible_batch_shapes() -> None:

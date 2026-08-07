@@ -65,6 +65,7 @@ class MASACTrainingProgress:
     intervention_rate: float
     last_update_metrics: MASACUpdateMetrics | None
     interval_diagnostics: dict[str, object] | None = None
+    critic_gradient_clip_rate: float = 0.0
 
 
 @dataclass
@@ -160,6 +161,7 @@ def train_masac(
     progress_interval_steps: int | None = None,
     progress_callback: Callable[[MASACTrainingProgress], None] | None = None,
     diagnostic_interval_steps: int | None = None,
+    update_metric_interval_steps: int | None = None,
     failure_trace_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> MASACTrainingSummary:
     """Collect exactly the configured number of steps and perform updates."""
@@ -183,7 +185,10 @@ def train_masac(
         or progress_interval_steps <= 0
     ):
         raise ValueError("progress_interval_steps must be a positive integer")
-    for name, value in (("diagnostic_interval_steps", diagnostic_interval_steps),):
+    for name, value in (
+        ("diagnostic_interval_steps", diagnostic_interval_steps),
+        ("update_metric_interval_steps", update_metric_interval_steps),
+    ):
         if value is not None and (isinstance(value, bool) or not isinstance(value, Integral) or value <= 0):
             raise ValueError(f"{name} must be a positive integer")
     if failure_trace_callback is not None and not callable(failure_trace_callback):
@@ -230,8 +235,10 @@ def train_masac(
     interval_start_step = 1
     recent_trace: list[dict[str, object]] = []
     episode_seed = int(config.seed)
+    interval_update_count = 0
+    interval_clip_count = 0
 
-    def emit_progress(environment_steps: int) -> None:
+    def emit_progress(environment_steps: int, critic_gradient_clip_rate: float = 0.0) -> None:
         if progress_callback is None:
             return
         mean_rate = float(np.mean(rates)) if rates else 0.0
@@ -245,6 +252,7 @@ def train_masac(
             intervention_rate=intervention_rate,
             last_update_metrics=last_metrics,
             interval_diagnostics=None,
+            critic_gradient_clip_rate=critic_gradient_clip_rate,
         ))
 
     for collected_steps in range(config.total_environment_steps):
@@ -285,6 +293,9 @@ def train_masac(
             for _ in range(config.updates_per_step):
                 last_metrics = agent.update(replay_buffer.sample(config.batch_size, device=getattr(agent, "device", None)))
                 total_updates += 1
+                if isinstance(last_metrics, MASACUpdateMetrics):
+                    interval_update_count += 1
+                    interval_clip_count += int(last_metrics.critic_gradient_clip_applied)
         local, global_state = next_local, next_global
         if terminated or truncated:
             episode_returns.append(float(current_return))
@@ -313,11 +324,22 @@ def train_masac(
             local, global_state = _observation_arrays(observation)
             recent_trace = []
         environment_steps = collected_steps + 1
+        is_update_metric_boundary = update_metric_interval_steps is not None and (
+            environment_steps % update_metric_interval_steps == 0
+            or environment_steps == config.total_environment_steps
+        )
+        critic_gradient_clip_rate = (
+            float(interval_clip_count / interval_update_count) if interval_update_count else 0.0
+        )
         if interval is not None and (environment_steps % diagnostic_interval_steps == 0 or environment_steps == config.total_environment_steps):
             diagnostic_payload = interval.payload(interval_start_step, environment_steps)
             if progress_callback is not None:
                 mean_rate = float(np.mean(rates)) if rates else 0.0
-                progress_callback(MASACTrainingProgress(environment_steps, total_updates, completed_episodes, replay_buffer.size, mean_rate, float(interventions / environment_steps), last_metrics, diagnostic_payload))
+                progress_callback(MASACTrainingProgress(
+                    environment_steps, total_updates, completed_episodes, replay_buffer.size,
+                    mean_rate, float(interventions / environment_steps), last_metrics,
+                    diagnostic_payload, critic_gradient_clip_rate,
+                ))
             interval = _IntervalDiagnostics()
             interval_start_step = environment_steps + 1
         if progress_callback is not None and (
@@ -325,7 +347,10 @@ def train_masac(
             or environment_steps == config.total_environment_steps
         ):
             if diagnostic_interval_steps is None or environment_steps % diagnostic_interval_steps != 0:
-                emit_progress(environment_steps)
+                emit_progress(environment_steps, critic_gradient_clip_rate)
+        if is_update_metric_boundary:
+            interval_update_count = 0
+            interval_clip_count = 0
 
     mean_rate = float(np.mean(rates)) if rates else 0.0
     intervention_rate = float(interventions / config.total_environment_steps)

@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
+from torch.nn.utils import clip_grad_norm_
 
 from .networks import CentralizedTwinCritic, SharedGaussianActor
 from .replay_buffer import ReplayBatch
@@ -45,6 +46,9 @@ class MASACUpdateMetrics:
     actor_log_std_max: float
     actor_gradient_norm: float
     critic_gradient_norm: float
+    critic_gradient_norm_pre_clip: float
+    critic_gradient_norm_post_clip: float
+    critic_gradient_clip_applied: float
 
 
 def _positive_int(value: object, name: str) -> int:
@@ -60,6 +64,12 @@ def _finite_positive(value: object, name: str) -> float:
     if not np.isfinite(result) or result <= 0.0:
         raise ValueError(f"{name} must be a positive finite value")
     return result
+
+
+def _optional_finite_positive(value: object, name: str) -> float | None:
+    if value is None:
+        return None
+    return _finite_positive(value, name)
 
 
 def _finite_probability(value: object, name: str, *, allow_zero: bool) -> float:
@@ -90,6 +100,7 @@ class ParameterSharingMASAC:
         initial_alpha: float = 0.2,
         target_entropy: float | None = None,
         device: str | torch.device | None = None,
+        critic_gradient_clip_norm: float | None = None,
     ) -> None:
         self.local_observation_dim = _positive_int(local_observation_dim, "local_observation_dim")
         self.global_state_dim = _positive_int(global_state_dim, "global_state_dim")
@@ -109,6 +120,9 @@ class ParameterSharingMASAC:
         self.critic_learning_rate = _finite_positive(critic_learning_rate, "critic_learning_rate")
         self.alpha_learning_rate = _finite_positive(alpha_learning_rate, "alpha_learning_rate")
         self.initial_alpha = _finite_positive(initial_alpha, "initial_alpha")
+        self.critic_gradient_clip_norm = _optional_finite_positive(
+            critic_gradient_clip_norm, "critic_gradient_clip_norm"
+        )
         if target_entropy is not None:
             if isinstance(target_entropy, bool) or not isinstance(target_entropy, Real):
                 raise ValueError("target_entropy must be a finite value")
@@ -273,7 +287,16 @@ class ParameterSharingMASAC:
         critic_loss_tensor = F.mse_loss(q1, target) + F.mse_loss(q2, target)
         self.critic_optimizer.zero_grad(set_to_none=True)
         critic_loss_tensor.backward()
-        critic_gradient_norm = self._gradient_norm(self.critic.parameters()).detach()
+        critic_gradient_norm_pre_clip = self._gradient_norm(self.critic.parameters()).detach()
+        if self.critic_gradient_clip_norm is None:
+            critic_gradient_norm_post_clip = critic_gradient_norm_pre_clip
+            critic_gradient_clip_applied = torch.zeros((), device=self.device)
+        else:
+            clip_grad_norm_(self.critic.parameters(), self.critic_gradient_clip_norm)
+            critic_gradient_norm_post_clip = self._gradient_norm(self.critic.parameters()).detach()
+            critic_gradient_clip_applied = (
+                critic_gradient_norm_pre_clip > self.critic_gradient_clip_norm
+            ).to(dtype=torch.float32)
         self.critic_optimizer.step()
         self.critic_optimizer.zero_grad(set_to_none=True)
 
@@ -340,7 +363,10 @@ class ParameterSharingMASAC:
             "actor_log_std_min": actor_log_std.min(),
             "actor_log_std_max": actor_log_std.max(),
             "actor_gradient_norm": actor_gradient_norm,
-            "critic_gradient_norm": critic_gradient_norm,
+            "critic_gradient_norm": critic_gradient_norm_pre_clip,
+            "critic_gradient_norm_pre_clip": critic_gradient_norm_pre_clip,
+            "critic_gradient_norm_post_clip": critic_gradient_norm_post_clip,
+            "critic_gradient_clip_applied": critic_gradient_clip_applied,
         }
         if not all(torch.isfinite(value).item() for value in values.values()):
             raise ValueError("MASAC update produced non-finite metrics")

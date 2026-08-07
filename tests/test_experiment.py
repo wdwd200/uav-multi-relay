@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 from uav_multi_relay import MultiRelayEnvironment
 from uav_multi_relay.learning import MultiAgentReplayBuffer, ParameterSharingMASAC
@@ -57,6 +58,7 @@ def test_experiment_writes_finite_artifacts_and_metadata() -> None:
         summary = json.loads(result.summary_file.read_text(encoding="utf-8"))
         assert summary["best_checkpoint"] == str(result.best_checkpoint)
         assert np.isfinite(result.best_mean_return)
+        assert all("critic_gradient_clip_rate" in line for line in training_lines)
 
 
 def test_experiment_rejects_nonempty_output_and_invalid_intervals() -> None:
@@ -102,3 +104,19 @@ def test_experiment_decouples_log_and_evaluation_schedules(
         _, final_metadata = load_masac_checkpoint(result.final_checkpoint)
         assert best_metadata.environment_steps in expected_evaluation
         assert final_metadata.environment_steps == total_steps
+
+
+def test_checkpoint_preserves_clip_configuration_and_loads_legacy_configuration() -> None:
+    with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+        path = Path(directory) / "agent.pt"
+        agent = ParameterSharingMASAC(4, 5, 2, hidden_dims=(8, 8), critic_gradient_clip_norm=1000.0)
+        from uav_multi_relay.training import MASACCheckpointMetadata, save_masac_checkpoint
+
+        save_masac_checkpoint(path, agent, MASACCheckpointMetadata(0, 0, 0))
+        loaded, _ = load_masac_checkpoint(path)
+        assert loaded.critic_gradient_clip_norm == 1000.0
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        payload["agent_config"].pop("critic_gradient_clip_norm")
+        torch.save(payload, path)
+        legacy_loaded, _ = load_masac_checkpoint(path)
+        assert legacy_loaded.critic_gradient_clip_norm is None

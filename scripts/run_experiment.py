@@ -34,6 +34,7 @@ def main() -> None:
     parser.add_argument("--evaluation-episodes", type=int, default=10)
     parser.add_argument("--evaluation-seed", type=int, default=10_000)
     parser.add_argument("--checkpoint-interval", type=int)
+    parser.add_argument("--critic-gradient-clip-norm", type=float)
     parser.add_argument("--diagnostics", action="store_true")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--reward-rate", type=float, default=1.0)
@@ -63,7 +64,10 @@ def main() -> None:
     local_dim = int(observation["local"].shape[-1])
     global_dim = int(observation["global"].shape[-1])
     replay = MultiAgentReplayBuffer(100_000 if args.batch_size <= 100_000 else args.batch_size, args.num_relays, local_dim, global_dim, 3, seed=args.seed)
-    agent = ParameterSharingMASAC(local_dim, global_dim, args.num_relays, action_dim=3, device=args.device)
+    agent = ParameterSharingMASAC(
+        local_dim, global_dim, args.num_relays, action_dim=3, device=args.device,
+        critic_gradient_clip_norm=args.critic_gradient_clip_norm,
+    )
     training_config = MASACTrainingConfig(args.steps, replay.capacity, args.batch_size, args.random_action_steps, args.update_after_steps, args.updates_per_step, args.seed)
     experiment_config = MASACExperimentConfig(
         args.output_dir, args.log_interval, args.evaluation_interval, args.evaluation_episodes,

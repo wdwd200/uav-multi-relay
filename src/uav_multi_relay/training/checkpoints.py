@@ -31,14 +31,16 @@ def _agent_config(agent: ParameterSharingMASAC) -> dict[str, object]:
     names = (
         "local_observation_dim", "global_state_dim", "num_relays", "action_dim",
         "hidden_dims", "gamma", "tau", "actor_learning_rate", "critic_learning_rate",
-        "alpha_learning_rate", "initial_alpha", "target_entropy",
+        "alpha_learning_rate", "initial_alpha", "target_entropy", "critic_gradient_clip_norm",
     )
     try:
         config = {name: getattr(agent, name) for name in names}
     except AttributeError as error:
         raise ValueError("agent is missing checkpoint configuration") from error
     config["hidden_dims"] = tuple(int(value) for value in config["hidden_dims"])
-    if not all(np.isfinite(float(config[name])) for name in names[5:]):
+    if not all(np.isfinite(float(config[name])) for name in names[5:-1]):
+        raise ValueError("agent configuration must be finite")
+    if config["critic_gradient_clip_norm"] is not None and not np.isfinite(float(config["critic_gradient_clip_norm"])):
         raise ValueError("agent configuration must be finite")
     return config
 
@@ -120,9 +122,12 @@ def load_masac_checkpoint(
     if not isinstance(config, dict) or not isinstance(metadata_data, dict):
         raise ValueError("checkpoint configuration is malformed")
     expected = {"local_observation_dim", "global_state_dim", "num_relays", "action_dim", "hidden_dims", "gamma", "tau", "actor_learning_rate", "critic_learning_rate", "alpha_learning_rate", "initial_alpha", "target_entropy"}
-    if set(config) != expected:
+    current_expected = expected | {"critic_gradient_clip_norm"}
+    if set(config) not in (expected, current_expected):
         raise ValueError("checkpoint agent configuration is incomplete")
     try:
+        config = dict(config)
+        config.setdefault("critic_gradient_clip_norm", None)
         agent = ParameterSharingMASAC(device=target_device, **config)
         metadata = MASACCheckpointMetadata(**metadata_data)
         agent.actor.load_state_dict(payload["actor_state_dict"])

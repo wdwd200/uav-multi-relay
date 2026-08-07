@@ -124,7 +124,7 @@ def run_masac_experiment(
         "experiment_config": {**asdict(experiment_config), "output_directory": str(output)},
         "agent_config": {
             name: (list(getattr(agent, name)) if name == "hidden_dims" else getattr(agent, name))
-            for name in ("local_observation_dim", "global_state_dim", "num_relays", "action_dim", "hidden_dims", "gamma", "tau", "actor_learning_rate", "critic_learning_rate", "alpha_learning_rate", "initial_alpha", "target_entropy")
+            for name in ("local_observation_dim", "global_state_dim", "num_relays", "action_dim", "hidden_dims", "gamma", "tau", "actor_learning_rate", "critic_learning_rate", "alpha_learning_rate", "initial_alpha", "target_entropy", "critic_gradient_clip_norm")
         },
         "observation_dimensions": {"local": list(local.shape), "global": list(global_state.shape)},
         "action_dimension": agent.action_dim,
@@ -162,6 +162,7 @@ def run_masac_experiment(
                     "replay_size": progress.replay_size,
                     "mean_rate_e2e_bps": progress.mean_rate_e2e_bps,
                     "intervention_rate": progress.intervention_rate,
+                    "critic_gradient_clip_rate": progress.critic_gradient_clip_rate,
                     **_metrics_payload(progress.last_update_metrics),
                 }
                 if progress.interval_diagnostics is not None:
@@ -200,6 +201,7 @@ def run_masac_experiment(
                 ),
                 progress_callback=progress_callback,
                 diagnostic_interval_steps=experiment_config.log_interval_steps if experiment_config.diagnostics else None,
+                update_metric_interval_steps=experiment_config.log_interval_steps,
                 failure_trace_callback=(lambda payload: _write_json_line(failure_handle, payload)) if failure_handle is not None else None,
             )
         finally:
