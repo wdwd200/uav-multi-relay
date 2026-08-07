@@ -1,33 +1,35 @@
-# Codex 执行计划：阶段 4C——参数共享 MATD3 与 MADDPG 统一实现
+# Codex 执行计划：阶段 4D——确定性算法正式训练、十策略比较与通信模型敏感性
 
 ## 1. 本轮目标
 
 当前任务属于正式阶段：
 
 ```text
-阶段 4C
+阶段 4D
 ```
 
-本轮一次性完成：
+本轮一次完成：
 
-1. 参数共享 MATD3；
-2. 参数共享 MADDPG；
-3. 两算法共用的确定性 Actor、训练器、实验运行器和 checkpoint 基础设施；
-4. 统一比较器对 MATD3、MADDPG 的支持；
-5. 完整单元测试、集成测试和两个短程冒烟实验。
+1. 修复 MATD3/MADDPG Replay Buffer 未设 seed 的可复现性问题；
+2. 补强确定性算法关键语义测试；
+3. 从头完成 MATD3 20,000 步训练；
+4. 从头完成 MADDPG 20,000 步训练；
+5. 完成四种学习算法加六种基线的十策略统一比较；
+6. 完成 TDMA 和天线模型的冻结策略敏感性实验；
+7. 输出统一结果报告。
 
-本轮不进行 20,000 步正式训练，不判断两算法性能。
+不得把上述事项再拆成单独修复轮次。
 
 本轮结果文档：
 
 ```text
-STAGE_4C_MATD3_MADDPG_IMPLEMENTATION_REPORT.md
+STAGE_4D_TEN_POLICY_COMPARISON_SENSITIVITY_REPORT.md
 ```
 
-本轮通过后直接进入：
+本轮完成后进入：
 
 ```text
-阶段 4D——确定性算法正式训练、十策略比较与核心消融
+阶段 4E——核心结构与动态场景消融
 ```
 
 ------
@@ -48,381 +50,350 @@ git log -3 --oneline
 M AGENTS.md
 ```
 
-确认当前代码至少包含：
+确认当前代码包含：
 
 ```text
-87bd320 feat: compare MAPPO with MASAC and baselines
-ec4d7f1 docs: record stage 4B MAPPO comparison
+1c9bbfb feat: implement parameter-sharing MATD3 and MADDPG
+0642944 docs: record stage 4C deterministic MARL implementation
 ```
 
-出现其他未提交文件时立即停止，不自动恢复。
+确认以下 checkpoint 存在：
+
+```text
+outputs/stage3g_r4_final_seed0/best_checkpoint.pt
+outputs/stage4b_mappo_seed0/best_checkpoint.pt
+```
+
+缺失任一 checkpoint 时立即停止，不重新训练 MASAC 或 MAPPO。
 
 ------
 
-## 3. 统一动作与 Replay 语义
+## 3. 正式训练前的阻断修复
 
-MATD3 和 MADDPG 的 Actor 输出：
+### 3.1 Replay Buffer seed
 
-```text
-requested normalized action ∈ [-1, 1]
-```
-
-环境仍执行：
+修改：
 
 ```text
-requested action
-→ safety filter
-→ applied action
-→ state transition
+scripts/_run_deterministic_experiment.py
 ```
 
-两算法必须继续使用现有 `MultiAgentReplayBuffer`：
+创建 Replay Buffer 时必须传入：
+
+```python
+seed=args.seed
+```
+
+即：
+
+```python
+buffer = MultiAgentReplayBuffer(
+    capacity=args.replay_capacity,
+    num_relays=config.num_relays,
+    local_observation_dim=local_dim,
+    global_state_dim=global_dim,
+    action_dim=agent.action_dim,
+    seed=args.seed,
+)
+```
+
+不得使用额外随机 seed。
+
+### 3.2 可复现性测试
+
+使用相同：
 
 ```text
-Replay Buffer 保存 applied normalized action
+算法
+环境配置
+训练 seed
+Replay Buffer seed
+Torch seed
+NumPy seed
 ```
 
-不得修改现有 Replay Buffer 数据语义。
-
-Critic 的真实 transition 训练使用：
+运行两次短训练，验证除输出路径和计时外：
 
 ```text
-replay_batch.applied_actions
+训练日志一致
+评估日志一致
+summary 核心数值一致
+final Actor 参数一致
+final Critic 参数一致
 ```
 
-Actor 更新和 target action 使用 Actor 直接产生的 requested action。
+再使用不同 seed，验证至少一个模型参数或训练指标不同。
 
-报告必须明确：
+### 3.3 训练指标命名
 
-> 安全过滤器不可微，因此 Actor 更新不是精确的约束策略梯度；这是当前 MASAC、MATD3 和 MADDPG 共享的 off-policy 动作语义限制。
+将训练器当前的：
 
-requested/applied mismatch 只用于诊断。
+```text
+termination_rate
+```
 
-本轮不得通过修改安全过滤器解决该问题。
+改为更准确的：
+
+```text
+termination_event_rate_per_step
+```
+
+同时新增：
+
+```text
+terminated_episode_rate
+mean_episode_length
+mean_episode_return
+```
+
+不得改变环境终止逻辑。
+
+旧日志字段如需兼容，可以保留并标记 deprecated，但新报告不得把每步事件率解释成 episode 终止率。
 
 ------
 
-## 4. 文件结构
+## 4. 补强关键测试
 
-建议新增：
+不单独增加修复阶段，直接在本轮补齐。
+
+至少增加：
+
+### MADDPG
+
+- `terminated=True` 时 target 只有 reward；
+- `truncated=True, terminated=False` 时仍 bootstrap；
+- Actor、Critic和两个 target 网络都按预期更新；
+- Polyak update 的精确数值测试。
+
+### MATD3
+
+- target Q 使用 `min(target_q1, target_q2)`；
+- target noise 被 `noise_clip` 限制；
+- target action 被限制到 `[-1,1]`；
+- 非 delayed step 不更新 Actor 和 target 网络；
+- delayed step 更新 Actor 和全部 target 网络；
+- checkpoint 恢复后 `update_count` 和 delay 节奏保持一致。
+
+### Checkpoint
+
+保存前与加载后比较：
+
+```text
+Actor
+Target Actor
+Critic/Twin Critic
+Target Critic
+全部 optimizer state
+确定性 action
+Q 输出
+配置
+metadata
+```
+
+不得只比较 Actor action。
+
+------
+
+## 5. 代码可读性整理
+
+仅整理本轮直接涉及的文件：
 
 ```text
 src/uav_multi_relay/learning/deterministic.py
-src/uav_multi_relay/learning/matd3.py
-src/uav_multi_relay/learning/maddpg.py
-
 src/uav_multi_relay/training/deterministic_trainer.py
 src/uav_multi_relay/training/deterministic_experiment.py
 src/uav_multi_relay/training/deterministic_checkpoints.py
-src/uav_multi_relay/training/deterministic_evaluator.py
-
-scripts/run_matd3_experiment.py
-scripts/run_maddpg_experiment.py
-
-tests/test_deterministic_learning.py
-tests/test_deterministic_training.py
-tests/test_deterministic_experiment.py
+scripts/_run_deterministic_experiment.py
+相关测试
 ```
 
-允许修改：
+要求：
 
-```text
-src/uav_multi_relay/learning/networks.py
-src/uav_multi_relay/learning/__init__.py
-src/uav_multi_relay/training/__init__.py
-src/uav_multi_relay/analysis/comparison.py
-scripts/compare_baselines.py
-tests/test_comparison.py
-README.md
-AGENTS.md
-```
-
-禁止修改：
-
-```text
-environment.py
-safety.py
-kinematics.py
-奖励公式和默认权重
-通信模型
-TDMA
-MASAC 算法
-MAPPO 算法
-规则基线
-现有 checkpoint 格式
-```
+- 不再新增一行多个主要语句；
+- 复杂方法拆分为清晰步骤；
+- 公共类和函数保留简短 docstring；
+- 不做全仓库无关格式化；
+- 不改变算法公式。
 
 ------
 
-## 5. 共用网络
+## 6. 完整验证
 
-### 5.1 参数共享确定性 Actor
+运行：
 
-新增：
-
-```python
-SharedDeterministicActor
+```bash
+python -m pytest
+python -m compileall -q src tests scripts
 ```
 
-输入：
+要求：
 
 ```text
-(batch, K, local_observation_dim)
+现有 200 项测试全部保留
+新增测试全部通过
+无新增 Pytest 警告
+编译成功
 ```
 
-输出：
-
-```text
-(batch, K, action_dim)
-```
-
-输出必须通过 `tanh` 限制到：
-
-```text
-[-1, 1]
-```
-
-所有中继共享 Actor 参数，角色差异由现有局部观测中的角色编码表达。
-
-### 5.2 集中式 Critic
-
-MADDPG 使用：
-
-```python
-CentralizedCritic
-```
-
-输入：
-
-```text
-global state + flattened joint action
-```
-
-输出：
-
-```text
-Q(s, a1, ..., aK)
-```
-
-MATD3 继续使用或复用：
-
-```python
-CentralizedTwinCritic
-```
-
-不得重复实现相同 MLP 拼接逻辑。
+正式训练开始前，必须先完成两次同 seed 的短训练复现测试。
 
 ------
 
-## 6. 参数共享 MADDPG
+## 7. MATD3 正式训练
 
-新增：
+输出目录：
 
-```python
-ParameterSharingMADDPG
+```text
+outputs/stage4d_matd3_seed0
 ```
 
-固定语义：
+运行：
 
-- 一个共享 Actor；
-- 一个集中式 Critic；
-- Actor target；
-- Critic target；
-- 每次 update 都更新 Actor；
-- 每次 update 后软更新 Actor target 和 Critic target；
-- target Q 使用 target Actor 的联合动作；
-- 真实终止不 bootstrap；
-- truncated transition 允许 bootstrap。
+```bash
+python scripts/run_matd3_experiment.py \
+  --output-dir outputs/stage4d_matd3_seed0 \
+  --steps 20000 \
+  --max-steps 250 \
+  --waypoint-radius 90 \
+  --batch-size 256 \
+  --replay-capacity 100000 \
+  --random-action-steps 2000 \
+  --update-after-steps 2000 \
+  --updates-per-step 1 \
+  --exploration-noise-std 0.1 \
+  --log-interval 1000 \
+  --evaluation-interval 2500 \
+  --evaluation-episodes 5 \
+  --checkpoint-interval 2500 \
+  --reward-rate 1.0 \
+  --reward-link 1.0 \
+  --reward-separation 1.0 \
+  --reward-intervention 0.1 \
+  --reward-motion 0.1 \
+  --reward-failure 1.0 \
+  --seed 0 \
+  --evaluation-seed 10000 \
+  --device cpu
+```
 
-默认参数：
+算法配置固定使用：
 
 ```text
 gamma = 0.99
 tau = 0.005
 actor learning rate = 3e-4
 critic learning rate = 3e-4
-```
-
-Actor loss：
-
-```text
--Q(s, actor(local_observations)).mean()
-```
-
-Critic loss：
-
-```text
-MSE(current Q, target Q)
-```
-
-------
-
-## 7. 参数共享 MATD3
-
-新增：
-
-```python
-ParameterSharingMATD3
-```
-
-必须包含 TD3 的三个核心特征：
-
-1. Twin Critic；
-2. Target policy smoothing；
-3. Delayed Actor update。
-
-默认参数：
-
-```text
-gamma = 0.99
-tau = 0.005
-actor learning rate = 3e-4
-critic learning rate = 3e-4
-
 policy noise std = 0.2
 noise clip = 0.5
 policy delay = 2
 ```
 
-Target action：
-
-```text
-target_actor(next_observation)
-+ clipped Gaussian noise
-```
-
-最终裁剪到：
-
-```text
-[-1, 1]
-```
-
-Target Q：
-
-```text
-reward
-+ gamma * (1 - terminated)
-  * min(target_q1, target_q2)
-```
-
-Actor update时使用：
-
-```text
--Q1(s, actor(local_observations)).mean()
-```
-
-Actor 和全部 target 网络只在 delayed update 时更新。
-
-不得把 MATD3 实现成仅有 Twin Critic 的 MADDPG。
+不得根据结果修改参数。
 
 ------
 
-## 8. 训练和探索
+## 8. MADDPG 正式训练
 
-两算法共用确定性训练器。
-
-训练流程：
+输出目录：
 
 ```text
-随机动作预热
-→ Actor requested action
-→ 添加探索高斯噪声
-→ clip 到 [-1, 1]
-→ 环境安全过滤
-→ 保存 applied action
-→ 采样 ReplayBatch
-→ 算法 update
+outputs/stage4d_maddpg_seed0
 ```
 
-默认正式训练配置留到 4D，本轮冒烟配置可缩小。
+运行：
 
-训练日志至少包括：
+```bash
+python scripts/run_maddpg_experiment.py \
+  --output-dir outputs/stage4d_maddpg_seed0 \
+  --steps 20000 \
+  --max-steps 250 \
+  --waypoint-radius 90 \
+  --batch-size 256 \
+  --replay-capacity 100000 \
+  --random-action-steps 2000 \
+  --update-after-steps 2000 \
+  --updates-per-step 1 \
+  --exploration-noise-std 0.1 \
+  --log-interval 1000 \
+  --evaluation-interval 2500 \
+  --evaluation-episodes 5 \
+  --checkpoint-interval 2500 \
+  --reward-rate 1.0 \
+  --reward-link 1.0 \
+  --reward-separation 1.0 \
+  --reward-intervention 0.1 \
+  --reward-motion 0.1 \
+  --reward-failure 1.0 \
+  --seed 0 \
+  --evaluation-seed 10000 \
+  --device cpu
+```
+
+算法配置固定使用：
 
 ```text
-environment steps
-total updates
-completed episodes
-episode return
-episode length
+gamma = 0.99
+tau = 0.005
+actor learning rate = 3e-4
+critic learning rate = 3e-4
+```
+
+不得根据结果修改参数。
+
+------
+
+## 9. 正式训练验收
+
+两种算法都必须完成：
+
+```text
+20,000 environment steps
+18,001 updates
+周期 checkpoint
+best checkpoint
+final checkpoint
+全部日志有限
+```
+
+分别报告：
+
+```text
+各 checkpoint mean return
 mean rate
-termination rate
+terminated episode rate
+mean episode length
 intervention rate
 requested/applied mismatch rate
-
-critic loss
-actor loss
-current Q mean
-target Q mean
-TD error mean
-Actor gradient norm
-Critic gradient norm
-Actor 是否更新
+Actor loss
+Critic loss
+Q mean
+TD error
+Actor/Critic gradient
 ```
 
-MATD3 额外记录：
-
-```text
-policy delay counter
-actor update rate
-target smoothing noise mean/std/max
-```
-
-所有指标必须有限；不得使用 `nan_to_num()` 隐藏异常。
+不得因为结果差而提前停止。
 
 ------
 
-## 9. Checkpoint 和实验入口
+## 10. 十策略统一比较
 
-使用共用 checkpoint 容器，但 metadata 必须包含：
-
-```text
-algorithm = matd3 或 maddpg
-```
-
-保存：
+checkpoint：
 
 ```text
-Actor
-Critic 或 Twin Critic
-全部 target 网络
-全部 optimizer
-算法配置
-网络维度
-environment steps
-total updates
-completed episodes
+MAPPO:
+outputs/stage4b_mappo_seed0/best_checkpoint.pt
+
+MASAC:
+outputs/stage3g_r4_final_seed0/best_checkpoint.pt
+
+MATD3:
+outputs/stage4d_matd3_seed0/best_checkpoint.pt
+
+MADDPG:
+outputs/stage4d_maddpg_seed0/best_checkpoint.pt
 ```
 
-加载错误算法类型时必须拒绝。
-
-新增两个薄 CLI：
-
-```text
-scripts/run_matd3_experiment.py
-scripts/run_maddpg_experiment.py
-```
-
-两者复用相同实验基础设施，不得复制整套 trainer。
-
-输出至少包含：
-
-```text
-run_config.json
-training_metrics.jsonl
-evaluation_metrics.jsonl
-summary.json
-best_checkpoint.pt
-final_checkpoint.pt
-checkpoints/
-```
-
-输出目录必须为空。
-
-------
-
-## 10. 统一比较支持
-
-将比较器扩展为：
+比较策略：
 
 ```text
 mappo
@@ -437,218 +408,226 @@ greedy
 mpc
 ```
 
-CLI 新增：
+固定：
 
 ```text
---matd3-checkpoint
---maddpg-checkpoint
+episodes = 10
+seeds = 20000–20009
+max_steps = 250
+waypoint radius = 90
+greedy sweeps = 1
+MPC horizon = 2
+MPC population = 8
+MPC iterations = 2
 ```
 
-要求：
-
-- 仅请求对应算法时才加载 checkpoint；
-- 四个学习算法可在同一次比较中运行；
-- 所有策略使用同一 episode seeds；
-- 所有学习算法使用 deterministic action；
-- 比较不得修改模型参数；
-- intervention rate 与 requested/applied mismatch rate 在报告中分开显示。
-
-同时修正文字表述：
-
-> 4B 只能证明当前 MAPPO 实现优于当前 MASAC 实现，不能单独证明动作语义是性能差异的原因。
-
-不得修改 4B 历史报告；在本轮报告中写明修正解释即可。
-
-------
-
-## 11. 必须测试
-
-### 网络
-
-- 确定性 Actor shape、范围和有限性；
-- 相同输入产生相同输出；
-- 单 Critic 和 Twin Critic shape、有限性；
-- 动态支持 `K=1` 和 `K=4`。
-
-### MADDPG
-
-- target Q 精确数值；
-- terminated 不 bootstrap；
-- truncated 可 bootstrap；
-- Actor、Critic 和 target 网络实际更新；
-- soft update 数值正确；
-- 所有指标有限。
-
-### MATD3
-
-- Twin Critic 使用较小 target Q；
-- target noise 被正确 clip；
-- target action 保持在 `[-1, 1]`；
-- policy delay 生效；
-- 非 delayed step 不更新 Actor 和 target；
-- delayed step 更新 Actor 和 target；
-- Q1 用于 Actor loss。
-
-### Replay 和动作语义
-
-- Critic 使用 replay 中 applied action；
-- 改变 requested 诊断值不改变 Critic batch；
-- Actor update 使用 Actor requested action；
-- requested/applied mismatch 仅改变诊断指标。
-
-### Checkpoint
-
-- MATD3 完整往返；
-- MADDPG 完整往返；
-- 保存前后 deterministic action 和 Q 一致；
-- optimizer state 一致；
-- 算法类型不匹配时拒绝；
-- 恢复后可继续 update。
-
-### 比较器
-
-- MATD3、MADDPG 按需加载；
-- 四个学习算法同次运行；
-- seeds 一致；
-- 模型参数不变；
-- 缺失 checkpoint 报清晰错误；
-- intervention 和 mismatch 分别输出。
-
-不得删除或弱化现有 194 项测试。
-
-------
-
-## 12. 验证和冒烟
-
-运行：
-
-```bash
-python -m pytest
-python -m compileall -q src tests scripts
-```
-
-要求：
+输出目录：
 
 ```text
-现有 194 项测试全部保留
-新增测试全部通过
-无新增 Pytest 警告
-编译成功
+outputs/stage4d_ten_policy_comparison
 ```
 
-### MATD3 冒烟
-
-```bash
-python scripts/run_matd3_experiment.py \
-  --output-dir outputs/stage4c_matd3_smoke \
-  --steps 1000 \
-  --max-steps 50 \
-  --waypoint-radius 90 \
-  --batch-size 64 \
-  --random-action-steps 200 \
-  --update-after-steps 200 \
-  --updates-per-step 1 \
-  --evaluation-interval 500 \
-  --evaluation-episodes 2 \
-  --checkpoint-interval 500 \
-  --seed 0 \
-  --evaluation-seed 10000 \
-  --device cpu
-```
-
-### MADDPG 冒烟
-
-```bash
-python scripts/run_maddpg_experiment.py \
-  --output-dir outputs/stage4c_maddpg_smoke \
-  --steps 1000 \
-  --max-steps 50 \
-  --waypoint-radius 90 \
-  --batch-size 64 \
-  --random-action-steps 200 \
-  --update-after-steps 200 \
-  --updates-per-step 1 \
-  --evaluation-interval 500 \
-  --evaluation-episodes 2 \
-  --checkpoint-interval 500 \
-  --seed 0 \
-  --evaluation-seed 10000 \
-  --device cpu
-```
-
-两个冒烟实验必须：
-
-- 完成 1000 环境步；
-- 至少完成一次参数更新；
-- 所有指标有限；
-- best/final/周期 checkpoint 完整；
-- checkpoint 加载后 deterministic action 一致；
-- JSON/JSONL 可读取；
-- 输出目录不提交 Git。
-
-冒烟结果不用于性能判断。
-
-------
-
-## 13. 验收、报告和 Git
-
-本轮通过条件：
-
-1. MATD3 和 MADDPG 均完整实现；
-2. 两算法共享公共基础设施；
-3. MATD3 三项核心机制均正确；
-4. MADDPG 单 Critic 语义正确；
-5. terminated/truncated 处理正确；
-6. Replay 继续保存 applied action；
-7. checkpoint 完整；
-8. 比较器支持十策略；
-9. 完整测试通过；
-10. 两个冒烟实验通过；
-11. 未修改环境、奖励、MASAC 或 MAPPO；
-12. 最终工作区干净。
-
-将当前结果文档改名为：
-
-```bash
-git mv STAGE_4B_MAPPO_TRAINING_COMPARISON_REPORT.md \
-  STAGE_4C_MATD3_MADDPG_IMPLEMENTATION_REPORT.md
-```
-
-代码提交建议：
-
-```bash
-git commit -m "feat: implement parameter-sharing MATD3 and MADDPG"
-git push
-```
-
-报告提交建议：
-
-```bash
-git commit -m "docs: record stage 4C deterministic MARL implementation"
-git push
-```
-
-提交前不得加入：
+必须分别报告：
 
 ```text
-outputs/
-checkpoint
-JSON/JSONL 运行产物
-缓存
-临时日志
+mean return
+return std
+mean return per step
+mean rate
+minimum rate
+terminated episode rate
+mean episode length
+intervention rate
+requested/applied mismatch rate
+mean action computation time
+```
+
+不得将 intervention 与 mismatch 合并成一个字段。
+
+------
+
+## 11. TDMA 与天线冻结策略敏感性
+
+本轮只做：
+
+```text
+冻结策略敏感性
+```
+
+不是重新训练后的正式消融。
+
+### 11.1 配置支持
+
+为环境增加保持向后兼容的配置：
+
+```text
+tdma_mode = "optimal" | "equal"
+antenna_mode = "dipole" | "isotropic"
+```
+
+默认必须保持：
+
+```text
+tdma_mode = "optimal"
+antenna_mode = "dipole"
+```
+
+默认配置下的环境结果必须与修改前一致。
+
+实现：
+
+- `equal` 使用现有 `equal_tdma_rate()`；
+- `isotropic` 使用收发天线增益 `1.0`；
+- 不修改其他信道参数；
+- 配置必须经过校验；
+- run config 和比较输出必须记录两个模式。
+
+### 11.2 敏感性策略
+
+使用冻结 checkpoint 和同一 seeds，比较：
+
+```text
+mappo
+masac
+matd3
+maddpg
+stationary
+equal_spacing
+```
+
+场景：
+
+```text
+A：optimal TDMA + dipole antenna
+B：equal TDMA + dipole antenna
+C：optimal TDMA + isotropic antenna
+```
+
+每个场景：
+
+```text
+10 episodes
+seeds 20000–20009
+```
+
+不得重新训练策略。
+
+报告必须使用准确名称：
+
+```text
+冻结策略通信模型敏感性
+```
+
+不得称为完整的“重新训练消融实验”。
+
+------
+
+## 12. 客观结果分类
+
+不设定某个学习算法必须获胜。
+
+按结果分类：
+
+### A
+
+至少一种学习算法超过 Stationary，并降低终止率。
+
+### B
+
+学习算法优于 Random，但仍低于规则基线。
+
+### C
+
+所有学习算法仍明显低于规则基线。
+
+### D
+
+训练或比较因程序错误未完成。
+
+性能差不属于代码错误，不得在 4D 内继续调参。
+
+------
+
+## 13. 结果文档
+
+将当前报告改名：
+
+```bash
+git mv STAGE_4C_MATD3_MADDPG_IMPLEMENTATION_REPORT.md \
+  STAGE_4D_TEN_POLICY_COMPARISON_SENSITIVITY_REPORT.md
+```
+
+报告至少记录：
+
+```text
+Replay Buffer seed 修复
+同 seed 复现验证
+新增和恢复测试
+MATD3 完整训练
+MADDPG 完整训练
+十策略完整结果
+TDMA 敏感性
+天线敏感性
+冻结策略实验限制
+四种学习算法动作语义
+结果分类
+代码和报告 Commit
+最终工作区状态
 ```
 
 ------
 
-## 14. Codex CLI 最终输出
+## 14. 验收标准
+
+必须同时满足：
+
+1. Replay Buffer 使用训练 seed；
+2. 同 seed 短训练可重复；
+3. 不同 seed 产生不同结果；
+4. 完整测试通过；
+5. MATD3 20,000 步完成；
+6. MADDPG 20,000 步完成；
+7. 两算法 checkpoint 完整；
+8. 十策略全部完成 10 episode；
+9. 三个通信敏感性场景完成；
+10. 默认环境行为未改变；
+11. 未修改 MASAC 或 MAPPO 算法；
+12. 未筛选失败 episode；
+13. `outputs/` 未提交；
+14. 最终工作区干净。
+
+通过后进入：
+
+```text
+阶段 4E——核心结构与动态场景消融
+```
+
+------
+
+## 15. Git 与 CLI 输出
+
+建议代码提交：
+
+```text
+fix: make deterministic MARL experiments reproducible
+feat: add deterministic training comparison and communication sensitivity
+```
+
+结果报告提交：
+
+```text
+docs: record stage 4D ten-policy comparison
+```
+
+Codex CLI 最终必须输出：
 
 ```text
 ========================================
-阶段 4C MATD3 与 MADDPG 实现结果
+阶段 4D 正式训练与比较结果
 ========================================
 
 本轮结果文档：
-STAGE_4C_MATD3_MADDPG_IMPLEMENTATION_REPORT.md
+STAGE_4D_TEN_POLICY_COMPARISON_SENSITIVITY_REPORT.md
 
 代码 Commit SHA：
 <真实 SHA>
@@ -657,25 +636,28 @@ STAGE_4C_MATD3_MADDPG_IMPLEMENTATION_REPORT.md
 <真实 SHA>
 
 完整测试：
-<真实 passed 数量和耗时>
-
-MATD3 专项测试：
 <真实结果>
 
-MADDPG 专项测试：
-<真实结果>
+可复现性验证：
+<同 seed 是否一致>
 
-MATD3 冒烟：
-<真实结果>
+MATD3 训练：
+<完整结果>
 
-MADDPG 冒烟：
-<真实结果>
+MADDPG 训练：
+<完整结果>
 
-十策略比较支持：
-<完成或未完成>
+十策略比较：
+<是否完整及四个学习算法核心指标>
 
-是否修改环境、MAPPO 或 MASAC：
-<真实结果>
+TDMA 敏感性：
+<核心结果>
+
+天线敏感性：
+<核心结果>
+
+性能分类：
+<A / B / C / D>
 
 代码 push：
 <真实结果>
@@ -687,7 +669,7 @@ MADDPG 冒烟：
 <真实输出；干净时写 clean>
 
 下一建议任务：
-阶段 4D——确定性算法正式训练、十策略比较与核心消融
+阶段 4E——核心结构与动态场景消融
 
 ========================================
 ```

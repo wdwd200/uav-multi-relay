@@ -174,7 +174,7 @@ The diagnostic directory contains checkpoint evolution, policy diagnostics,
 reward contributions, failure summaries, and a Markdown/JSON summary. These are
 run artifacts and are not committed. The current repository execution report is
 named for its stage and task; see
-[`STAGE_4C_MATD3_MADDPG_IMPLEMENTATION_REPORT.md`](STAGE_4C_MATD3_MADDPG_IMPLEMENTATION_REPORT.md).
+[`STAGE_4D_TEN_POLICY_COMPARISON_SENSITIVITY_REPORT.md`](STAGE_4D_TEN_POLICY_COMPARISON_SENSITIVITY_REPORT.md).
 
 ## Policy Comparison
 
