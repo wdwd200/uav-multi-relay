@@ -1,38 +1,33 @@
-# Codex 执行计划：阶段 4B——MAPPO 固定配置训练与公平比较
+# Codex 执行计划：阶段 4C——参数共享 MATD3 与 MADDPG 统一实现
 
-## 1. 任务目标
+## 1. 本轮目标
 
 当前任务属于正式阶段：
 
 ```text
-阶段 4B
+阶段 4C
 ```
 
-目标：
+本轮一次性完成：
 
-1. 使用固定配置从头训练参数共享 MAPPO；
-2. 完成 20,000 环境步；
-3. 使用最佳 MAPPO checkpoint 进行统一比较；
-4. 与阶段 3最终 MASAC、Random、Stationary 和规则/优化基线使用相同场景与评估种子比较；
-5. 如实记录结果，不进行事后调参。
+1. 参数共享 MATD3；
+2. 参数共享 MADDPG；
+3. 两算法共用的确定性 Actor、训练器、实验运行器和 checkpoint 基础设施；
+4. 统一比较器对 MATD3、MADDPG 的支持；
+5. 完整单元测试、集成测试和两个短程冒烟实验。
 
-本轮不要求 MAPPO 必须超过基线。
-
-本轮是否通过只取决于：
-
-```text
-训练完整
-评估完整
-比较公平
-结果可复现
-```
-
-MAPPO 性能不理想时也不得新增 `4B-R1` 调参任务；记录结果后继续阶段 4C。
+本轮不进行 20,000 步正式训练，不判断两算法性能。
 
 本轮结果文档：
 
 ```text
-STAGE_4B_MAPPO_TRAINING_COMPARISON_REPORT.md
+STAGE_4C_MATD3_MADDPG_IMPLEMENTATION_REPORT.md
+```
+
+本轮通过后直接进入：
+
+```text
+阶段 4D——确定性算法正式训练、十策略比较与核心消融
 ```
 
 ------
@@ -53,83 +48,387 @@ git log -3 --oneline
 M AGENTS.md
 ```
 
-如果存在其他未提交文件，立即停止并列出。
-
-确认代码包含：
+确认当前代码至少包含：
 
 ```text
-9b19c8d fix: use per-relay MAPPO probability ratios
+87bd320 feat: compare MAPPO with MASAC and baselines
+ec4d7f1 docs: record stage 4B MAPPO comparison
 ```
 
-确认以下 MASAC checkpoint 是否存在：
-
-```text
-outputs/stage3g_r4_final_seed0/best_checkpoint.pt
-```
-
-如果不存在：
-
-- 不重新训练 MASAC；
-- 立即停止比较准备；
-- 在 CLI 中报告缺失路径。
+出现其他未提交文件时立即停止，不自动恢复。
 
 ------
 
-## 3. 固定 MAPPO 配置
+## 3. 统一动作与 Replay 语义
 
-不得进行超参数搜索。
-
-固定配置：
+MATD3 和 MADDPG 的 Actor 输出：
 
 ```text
-num_relays = 4
-waypoint radius = 90 m
-max_steps = 250
-training steps = 20000
+requested normalized action ∈ [-1, 1]
+```
 
-rollout steps = 1000
-update epochs = 10
-mini-batch size = 250
+环境仍执行：
 
+```text
+requested action
+→ safety filter
+→ applied action
+→ state transition
+```
+
+两算法必须继续使用现有 `MultiAgentReplayBuffer`：
+
+```text
+Replay Buffer 保存 applied normalized action
+```
+
+不得修改现有 Replay Buffer 数据语义。
+
+Critic 的真实 transition 训练使用：
+
+```text
+replay_batch.applied_actions
+```
+
+Actor 更新和 target action 使用 Actor 直接产生的 requested action。
+
+报告必须明确：
+
+> 安全过滤器不可微，因此 Actor 更新不是精确的约束策略梯度；这是当前 MASAC、MATD3 和 MADDPG 共享的 off-policy 动作语义限制。
+
+requested/applied mismatch 只用于诊断。
+
+本轮不得通过修改安全过滤器解决该问题。
+
+------
+
+## 4. 文件结构
+
+建议新增：
+
+```text
+src/uav_multi_relay/learning/deterministic.py
+src/uav_multi_relay/learning/matd3.py
+src/uav_multi_relay/learning/maddpg.py
+
+src/uav_multi_relay/training/deterministic_trainer.py
+src/uav_multi_relay/training/deterministic_experiment.py
+src/uav_multi_relay/training/deterministic_checkpoints.py
+src/uav_multi_relay/training/deterministic_evaluator.py
+
+scripts/run_matd3_experiment.py
+scripts/run_maddpg_experiment.py
+
+tests/test_deterministic_learning.py
+tests/test_deterministic_training.py
+tests/test_deterministic_experiment.py
+```
+
+允许修改：
+
+```text
+src/uav_multi_relay/learning/networks.py
+src/uav_multi_relay/learning/__init__.py
+src/uav_multi_relay/training/__init__.py
+src/uav_multi_relay/analysis/comparison.py
+scripts/compare_baselines.py
+tests/test_comparison.py
+README.md
+AGENTS.md
+```
+
+禁止修改：
+
+```text
+environment.py
+safety.py
+kinematics.py
+奖励公式和默认权重
+通信模型
+TDMA
+MASAC 算法
+MAPPO 算法
+规则基线
+现有 checkpoint 格式
+```
+
+------
+
+## 5. 共用网络
+
+### 5.1 参数共享确定性 Actor
+
+新增：
+
+```python
+SharedDeterministicActor
+```
+
+输入：
+
+```text
+(batch, K, local_observation_dim)
+```
+
+输出：
+
+```text
+(batch, K, action_dim)
+```
+
+输出必须通过 `tanh` 限制到：
+
+```text
+[-1, 1]
+```
+
+所有中继共享 Actor 参数，角色差异由现有局部观测中的角色编码表达。
+
+### 5.2 集中式 Critic
+
+MADDPG 使用：
+
+```python
+CentralizedCritic
+```
+
+输入：
+
+```text
+global state + flattened joint action
+```
+
+输出：
+
+```text
+Q(s, a1, ..., aK)
+```
+
+MATD3 继续使用或复用：
+
+```python
+CentralizedTwinCritic
+```
+
+不得重复实现相同 MLP 拼接逻辑。
+
+------
+
+## 6. 参数共享 MADDPG
+
+新增：
+
+```python
+ParameterSharingMADDPG
+```
+
+固定语义：
+
+- 一个共享 Actor；
+- 一个集中式 Critic；
+- Actor target；
+- Critic target；
+- 每次 update 都更新 Actor；
+- 每次 update 后软更新 Actor target 和 Critic target；
+- target Q 使用 target Actor 的联合动作；
+- 真实终止不 bootstrap；
+- truncated transition 允许 bootstrap。
+
+默认参数：
+
+```text
 gamma = 0.99
-gae lambda = 0.95
-clip ratio = 0.2
+tau = 0.005
 actor learning rate = 3e-4
 critic learning rate = 3e-4
-value loss coefficient = 0.5
-entropy coefficient = 0.01
-max gradient norm = 0.5
-
-training seed = 0
-evaluation seed = 10000
-evaluation interval = 2500
-evaluation episodes = 5
-checkpoint interval = 2500
-device = cpu
 ```
 
-奖励权重保持：
+Actor loss：
 
 ```text
-rate = 1.0
-link = 1.0
-separation = 1.0
-intervention = 0.1
-motion = 0.1
-failure = 1.0
+-Q(s, actor(local_observations)).mean()
 ```
 
-不得根据中间结果修改配置。
+Critic loss：
+
+```text
+MSE(current Q, target Q)
+```
 
 ------
 
-## 4. 统一比较支持
+## 7. 参数共享 MATD3
 
-扩展现有统一比较入口，使其支持：
+新增：
+
+```python
+ParameterSharingMATD3
+```
+
+必须包含 TD3 的三个核心特征：
+
+1. Twin Critic；
+2. Target policy smoothing；
+3. Delayed Actor update。
+
+默认参数：
+
+```text
+gamma = 0.99
+tau = 0.005
+actor learning rate = 3e-4
+critic learning rate = 3e-4
+
+policy noise std = 0.2
+noise clip = 0.5
+policy delay = 2
+```
+
+Target action：
+
+```text
+target_actor(next_observation)
++ clipped Gaussian noise
+```
+
+最终裁剪到：
+
+```text
+[-1, 1]
+```
+
+Target Q：
+
+```text
+reward
++ gamma * (1 - terminated)
+  * min(target_q1, target_q2)
+```
+
+Actor update时使用：
+
+```text
+-Q1(s, actor(local_observations)).mean()
+```
+
+Actor 和全部 target 网络只在 delayed update 时更新。
+
+不得把 MATD3 实现成仅有 Twin Critic 的 MADDPG。
+
+------
+
+## 8. 训练和探索
+
+两算法共用确定性训练器。
+
+训练流程：
+
+```text
+随机动作预热
+→ Actor requested action
+→ 添加探索高斯噪声
+→ clip 到 [-1, 1]
+→ 环境安全过滤
+→ 保存 applied action
+→ 采样 ReplayBatch
+→ 算法 update
+```
+
+默认正式训练配置留到 4D，本轮冒烟配置可缩小。
+
+训练日志至少包括：
+
+```text
+environment steps
+total updates
+completed episodes
+episode return
+episode length
+mean rate
+termination rate
+intervention rate
+requested/applied mismatch rate
+
+critic loss
+actor loss
+current Q mean
+target Q mean
+TD error mean
+Actor gradient norm
+Critic gradient norm
+Actor 是否更新
+```
+
+MATD3 额外记录：
+
+```text
+policy delay counter
+actor update rate
+target smoothing noise mean/std/max
+```
+
+所有指标必须有限；不得使用 `nan_to_num()` 隐藏异常。
+
+------
+
+## 9. Checkpoint 和实验入口
+
+使用共用 checkpoint 容器，但 metadata 必须包含：
+
+```text
+algorithm = matd3 或 maddpg
+```
+
+保存：
+
+```text
+Actor
+Critic 或 Twin Critic
+全部 target 网络
+全部 optimizer
+算法配置
+网络维度
+environment steps
+total updates
+completed episodes
+```
+
+加载错误算法类型时必须拒绝。
+
+新增两个薄 CLI：
+
+```text
+scripts/run_matd3_experiment.py
+scripts/run_maddpg_experiment.py
+```
+
+两者复用相同实验基础设施，不得复制整套 trainer。
+
+输出至少包含：
+
+```text
+run_config.json
+training_metrics.jsonl
+evaluation_metrics.jsonl
+summary.json
+best_checkpoint.pt
+final_checkpoint.pt
+checkpoints/
+```
+
+输出目录必须为空。
+
+------
+
+## 10. 统一比较支持
+
+将比较器扩展为：
 
 ```text
 mappo
 masac
+matd3
+maddpg
 random
 stationary
 equal_spacing
@@ -138,105 +437,88 @@ greedy
 mpc
 ```
 
-推荐修改：
+CLI 新增：
 
 ```text
-src/uav_multi_relay/analysis/comparison.py
-scripts/compare_baselines.py
-tests/test_comparison.py
-```
-
-如现有结构更适合新增独立入口，可以新增：
-
-```text
-scripts/compare_algorithms.py
-```
-
-但不得复制整套比较逻辑。
-
-命令行必须能够分别接收：
-
-```text
---mappo-checkpoint
---masac-checkpoint
+--matd3-checkpoint
+--maddpg-checkpoint
 ```
 
 要求：
 
-- 只有请求 `mappo` 时才加载 MAPPO checkpoint；
-- 只有请求 `masac` 时才加载 MASAC checkpoint；
-- 缺少所需 checkpoint 时立即报清晰错误；
-- 保持旧的纯 MASAC/基线比较用法兼容；
-- MAPPO 使用 deterministic Actor action；
-- MASAC 使用 deterministic Actor action；
-- 所有算法使用相同环境配置、奖励、episode seeds 和指标。
+- 仅请求对应算法时才加载 checkpoint；
+- 四个学习算法可在同一次比较中运行；
+- 所有策略使用同一 episode seeds；
+- 所有学习算法使用 deterministic action；
+- 比较不得修改模型参数；
+- intervention rate 与 requested/applied mismatch rate 在报告中分开显示。
 
-不得改变任何算法本身。
+同时修正文字表述：
 
-------
+> 4B 只能证明当前 MAPPO 实现优于当前 MASAC 实现，不能单独证明动作语义是性能差异的原因。
 
-## 5. 公平性规则
-
-所有比较策略统一使用：
-
-```text
-episodes = 10
-episode seeds = 20000–20009
-max_steps = 250
-waypoint radius = 90 m
-num_relays = 4
-device = cpu
-```
-
-规则基线参数保持：
-
-```text
-greedy sweeps = 1
-MPC horizon = 2
-MPC population = 8
-MPC iterations = 2
-```
-
-必须报告：
-
-```text
-mean return
-return std
-mean return per step
-mean rate_e2e_bps
-minimum rate_e2e_bps
-termination rate
-mean episode length
-intervention rate
-requested/applied mismatch rate
-mean action computation time
-```
-
-MAPPO 与 MASAC 的内部动作训练语义不同：
-
-```text
-MAPPO ratio 使用 requested action
-MASAC Replay Buffer 使用 applied action
-```
-
-这属于算法实现差异，报告中必须说明；不得因此修改其中任一算法。
+不得修改 4B 历史报告；在本轮报告中写明修正解释即可。
 
 ------
 
-## 6. 比较功能测试
+## 11. 必须测试
 
-至少增加：
+### 网络
 
-1. MAPPO checkpoint 可由统一比较器加载；
-2. MAPPO deterministic action 被实际调用；
-3. MASAC 与 MAPPO 可在同一次比较中运行；
-4. 所有算法收到相同 episode seeds；
-5. MAPPO checkpoint 缺失时报错；
-6. MASAC checkpoint 缺失时报错；
-7. 未请求某算法时不要求对应 checkpoint；
-8. 输出 JSON 包含全部统一指标；
-9. 旧比较接口仍可运行；
-10. 比较过程不修改模型参数。
+- 确定性 Actor shape、范围和有限性；
+- 相同输入产生相同输出；
+- 单 Critic 和 Twin Critic shape、有限性；
+- 动态支持 `K=1` 和 `K=4`。
+
+### MADDPG
+
+- target Q 精确数值；
+- terminated 不 bootstrap；
+- truncated 可 bootstrap；
+- Actor、Critic 和 target 网络实际更新；
+- soft update 数值正确；
+- 所有指标有限。
+
+### MATD3
+
+- Twin Critic 使用较小 target Q；
+- target noise 被正确 clip；
+- target action 保持在 `[-1, 1]`；
+- policy delay 生效；
+- 非 delayed step 不更新 Actor 和 target；
+- delayed step 更新 Actor 和 target；
+- Q1 用于 Actor loss。
+
+### Replay 和动作语义
+
+- Critic 使用 replay 中 applied action；
+- 改变 requested 诊断值不改变 Critic batch；
+- Actor update 使用 Actor requested action；
+- requested/applied mismatch 仅改变诊断指标。
+
+### Checkpoint
+
+- MATD3 完整往返；
+- MADDPG 完整往返；
+- 保存前后 deterministic action 和 Q 一致；
+- optimizer state 一致；
+- 算法类型不匹配时拒绝；
+- 恢复后可继续 update。
+
+### 比较器
+
+- MATD3、MADDPG 按需加载；
+- 四个学习算法同次运行；
+- seeds 一致；
+- 模型参数不变；
+- 缺失 checkpoint 报清晰错误；
+- intervention 和 mismatch 分别输出。
+
+不得删除或弱化现有 194 项测试。
+
+------
+
+## 12. 验证和冒烟
 
 运行：
 
@@ -248,234 +530,105 @@ python -m compileall -q src tests scripts
 要求：
 
 ```text
-现有 191 项测试全部保留
+现有 194 项测试全部保留
 新增测试全部通过
 无新增 Pytest 警告
 编译成功
 ```
 
-------
-
-## 7. MAPPO 正式训练
-
-使用新的空目录：
-
-```text
-outputs/stage4b_mappo_seed0
-```
-
-运行：
+### MATD3 冒烟
 
 ```bash
-python scripts/run_mappo_experiment.py \
-  --output-dir outputs/stage4b_mappo_seed0 \
-  --steps 20000 \
-  --rollout-steps 1000 \
-  --max-steps 250 \
+python scripts/run_matd3_experiment.py \
+  --output-dir outputs/stage4c_matd3_smoke \
+  --steps 1000 \
+  --max-steps 50 \
   --waypoint-radius 90 \
-  --update-epochs 10 \
-  --mini-batch-size 250 \
-  --evaluation-interval 2500 \
-  --evaluation-episodes 5 \
-  --checkpoint-interval 2500 \
-  --reward-rate 1.0 \
-  --reward-link 1.0 \
-  --reward-separation 1.0 \
-  --reward-intervention 0.1 \
-  --reward-motion 0.1 \
-  --reward-failure 1.0 \
+  --batch-size 64 \
+  --random-action-steps 200 \
+  --update-after-steps 200 \
+  --updates-per-step 1 \
+  --evaluation-interval 500 \
+  --evaluation-episodes 2 \
+  --checkpoint-interval 500 \
   --seed 0 \
   --evaluation-seed 10000 \
   --device cpu
 ```
 
-如果部分算法参数没有 CLI 参数，则确认其值与 `MAPPOConfig` 默认值完全一致，并在报告中记录；不得为了添加无必要的 CLI 参数修改算法。
-
-训练必须完成：
-
-```text
-20,000 environment steps
-20 full rollouts
-discarded_partial_rollout_steps = 0
-周期 checkpoint
-best checkpoint
-final checkpoint
-```
-
-所有日志必须有限。
-
-------
-
-## 8. MAPPO 训练检查
-
-报告各评估 checkpoint 的：
-
-```text
-mean return
-mean rate
-termination rate
-episode length
-intervention rate
-requested/applied mismatch rate
-policy loss
-value loss
-entropy
-approx KL
-clip fraction
-Actor gradient norm
-Critic gradient norm
-```
-
-必须明确：
-
-- 最佳 checkpoint；
-- 最终 checkpoint；
-- 是否出现训练退化；
-- 是否出现 NaN/Infinity；
-- 是否出现持续 100% clip fraction；
-- 是否出现梯度长期触及 0.5 上限；
-- 是否发生大量 requested/applied mismatch。
-
-不得因为结果不好中断训练。
-
-------
-
-## 9. 七基线加两学习算法比较
-
-使用：
-
-```text
-MAPPO：
-outputs/stage4b_mappo_seed0/best_checkpoint.pt
-
-MASAC：
-outputs/stage3g_r4_final_seed0/best_checkpoint.pt
-```
-
-运行统一比较，策略顺序：
-
-```text
-mappo
-masac
-random
-stationary
-equal_spacing
-weighted_spacing
-greedy
-mpc
-```
-
-这里实际为 8 个策略。
-
-比较输出目录：
-
-```text
-outputs/stage4b_mappo_seed0/comparison
-```
-
-必须完成全部 10 个 episode，不得删除失败 episode。
-
-------
-
-## 10. 结果判读
-
-本轮不得设定“MAPPO 必须获胜”的通过门槛。
-
-只进行客观分类：
-
-### 情况 A
-
-```text
-MAPPO 明显优于 MASAC，且终止率更低
-```
-
-说明 MAPPO 更适合当前 on-policy requested-action 语义。
-
-### 情况 B
-
-```text
-MAPPO 与 MASAC 均明显低于规则基线
-```
-
-说明问题可能不只是 MASAC 特有，后续算法比较仍需保留环境硬约束和动作过滤影响分析。
-
-### 情况 C
-
-```text
-MAPPO 数值稳定但性能一般
-```
-
-继续阶段 4C，不进行本轮调参。
-
-### 情况 D
-
-```text
-训练或比较因代码错误未完成
-```
-
-阶段 4B 不通过，只修复直接导致中断的问题。
-
-性能差不属于代码错误。
-
-------
-
-## 11. 结果文档
-
-将当前报告改名：
+### MADDPG 冒烟
 
 ```bash
-git mv STAGE_4A_R1_MAPPO_SEMANTICS_REPAIR_REPORT.md \
-  STAGE_4B_MAPPO_TRAINING_COMPARISON_REPORT.md
+python scripts/run_maddpg_experiment.py \
+  --output-dir outputs/stage4c_maddpg_smoke \
+  --steps 1000 \
+  --max-steps 50 \
+  --waypoint-radius 90 \
+  --batch-size 64 \
+  --random-action-steps 200 \
+  --update-after-steps 200 \
+  --updates-per-step 1 \
+  --evaluation-interval 500 \
+  --evaluation-episodes 2 \
+  --checkpoint-interval 500 \
+  --seed 0 \
+  --evaluation-seed 10000 \
+  --device cpu
 ```
 
-报告至少记录：
+两个冒烟实验必须：
 
-```text
-固定训练配置
-完整测试结果
-训练步数和更新次数
-discarded partial rollout steps
-各 checkpoint 训练轨迹
-最佳和最终 checkpoint
-8 策略完整指标
-MAPPO 与 MASAC 动作语义差异
-公平性保证
-性能分类
-是否出现数值异常
-代码 Commit 和 push
-下一任务
-```
+- 完成 1000 环境步；
+- 至少完成一次参数更新；
+- 所有指标有限；
+- best/final/周期 checkpoint 完整；
+- checkpoint 加载后 deterministic action 一致；
+- JSON/JSONL 可读取；
+- 输出目录不提交 Git。
 
-根目录最终只保留：
-
-```text
-STAGE_4B_MAPPO_TRAINING_COMPARISON_REPORT.md
-```
+冒烟结果不用于性能判断。
 
 ------
 
-## 12. Git 提交
+## 13. 验收、报告和 Git
 
-比较功能和测试提交：
+本轮通过条件：
+
+1. MATD3 和 MADDPG 均完整实现；
+2. 两算法共享公共基础设施；
+3. MATD3 三项核心机制均正确；
+4. MADDPG 单 Critic 语义正确；
+5. terminated/truncated 处理正确；
+6. Replay 继续保存 applied action；
+7. checkpoint 完整；
+8. 比较器支持十策略；
+9. 完整测试通过；
+10. 两个冒烟实验通过；
+11. 未修改环境、奖励、MASAC 或 MAPPO；
+12. 最终工作区干净。
+
+将当前结果文档改名为：
 
 ```bash
-git status --short
-git add <实际修改的比较代码和测试> AGENTS.md
-git commit -m "feat: compare MAPPO with MASAC and baselines"
+git mv STAGE_4B_MAPPO_TRAINING_COMPARISON_REPORT.md \
+  STAGE_4C_MATD3_MADDPG_IMPLEMENTATION_REPORT.md
+```
+
+代码提交建议：
+
+```bash
+git commit -m "feat: implement parameter-sharing MATD3 and MADDPG"
 git push
 ```
 
-完成训练和报告后：
+报告提交建议：
 
 ```bash
-git add -A
-git status --short
-git commit -m "docs: record stage 4B MAPPO comparison"
+git commit -m "docs: record stage 4C deterministic MARL implementation"
 git push
-git status --short
 ```
 
-提交前确认没有加入：
+提交前不得加入：
 
 ```text
 outputs/
@@ -487,43 +640,15 @@ JSON/JSONL 运行产物
 
 ------
 
-## 13. 本轮验收标准
-
-必须同时满足：
-
-1. 完整测试通过；
-2. 比较器支持 MAPPO 和 MASAC；
-3. 20,000 步 MAPPO 训练完成；
-4. 20 个 rollout 全部更新；
-5. partial rollout 丢弃数为 0；
-6. 周期、best、final checkpoint 完整；
-7. 所有日志有限；
-8. 8 个策略均完成 10 episode；
-9. episode seeds 完全一致；
-10. 不筛选失败结果；
-11. 未修改环境、奖励、安全过滤、MASAC 或 MAPPO 算法；
-12. 结果文档名称正确；
-13. 最终工作区干净。
-
-通过后下一任务固定为：
-
-```text
-阶段 4C——参数共享 MATD3 实现与短程验证
-```
-
-无论 MAPPO 性能好坏，都不在 4B 内调参。
-
-------
-
 ## 14. Codex CLI 最终输出
 
 ```text
 ========================================
-阶段 4B MAPPO 训练与比较结果
+阶段 4C MATD3 与 MADDPG 实现结果
 ========================================
 
 本轮结果文档：
-STAGE_4B_MAPPO_TRAINING_COMPARISON_REPORT.md
+STAGE_4C_MATD3_MADDPG_IMPLEMENTATION_REPORT.md
 
 代码 Commit SHA：
 <真实 SHA>
@@ -532,16 +657,25 @@ STAGE_4B_MAPPO_TRAINING_COMPARISON_REPORT.md
 <真实 SHA>
 
 完整测试：
+<真实 passed 数量和耗时>
+
+MATD3 专项测试：
 <真实结果>
 
-MAPPO 训练：
-<步数、rollout 数、最佳评估>
+MADDPG 专项测试：
+<真实结果>
 
-8 策略比较：
-<是否完整及 MAPPO/MASAC/Stationary 核心指标>
+MATD3 冒烟：
+<真实结果>
 
-性能分类：
-<A / B / C / D>
+MADDPG 冒烟：
+<真实结果>
+
+十策略比较支持：
+<完成或未完成>
+
+是否修改环境、MAPPO 或 MASAC：
+<真实结果>
 
 代码 push：
 <真实结果>
@@ -553,7 +687,7 @@ MAPPO 训练：
 <真实输出；干净时写 clean>
 
 下一建议任务：
-阶段 4C——参数共享 MATD3 实现与短程验证
+阶段 4D——确定性算法正式训练、十策略比较与核心消融
 
 ========================================
 ```

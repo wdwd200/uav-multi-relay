@@ -51,6 +51,17 @@ termination separate from time-limit truncation. Parameter-sharing MASAC now
 implements action selection, critic targets, one-batch actor/critic/alpha updates,
 and Polyak target updates.
 
+## MATD3 and MADDPG Training
+
+Stage 4C adds parameter-sharing MATD3 and MADDPG. Both use a shared,
+tanh-bounded deterministic Actor and centralized Critic(s), while retaining the
+existing Replay Buffer contract: Critics train on the safety-filtered **applied**
+action, and Actors produce requested actions. The safety filter is
+non-differentiable, so this is an off-policy action-semantics limitation shared
+by MASAC, MATD3, and MADDPG rather than an exact constrained policy gradient.
+Use `python scripts/run_matd3_experiment.py --help` or
+`python scripts/run_maddpg_experiment.py --help`.
+
 The MPC planner predicts on a deep copy of the environment and optimizes the
 discounted full team reward. It executes only the first action of the selected
 joint sequence:
@@ -163,7 +174,7 @@ The diagnostic directory contains checkpoint evolution, policy diagnostics,
 reward contributions, failure summaries, and a Markdown/JSON summary. These are
 run artifacts and are not committed. The current repository execution report is
 named for its stage and task; see
-[`STAGE_4B_MAPPO_TRAINING_COMPARISON_REPORT.md`](STAGE_4B_MAPPO_TRAINING_COMPARISON_REPORT.md).
+[`STAGE_4C_MATD3_MADDPG_IMPLEMENTATION_REPORT.md`](STAGE_4C_MATD3_MADDPG_IMPLEMENTATION_REPORT.md).
 
 ## Policy Comparison
 
