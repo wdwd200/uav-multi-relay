@@ -74,8 +74,6 @@ python -m pip install -e ".[dev]"
 python -m pytest
 ```
 
-## MASAC Training
-
 ## MAPPO Training
 
 Stage 4A adds an independent parameter-sharing MAPPO implementation. Its PPO
@@ -85,6 +83,8 @@ diagnostics. MAPPO uses a centralized value critic, fixed on-policy rollouts,
 GAE with distinct terminated/truncated masks, atomic MAPPO-only checkpoints,
 and deterministic evaluation. Run a short experiment with
 `python scripts/run_mappo_experiment.py --help`.
+
+## MASAC Training
 
 Run a minimal training collection and update loop:
 

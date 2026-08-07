@@ -1,52 +1,47 @@
-# Codex 执行计划：阶段 4A——参数共享 MAPPO 实现
+# Codex 执行计划：阶段 4A-R1——MAPPO 概率比语义与 Checkpoint 验收修复
 
 ## 1. 任务性质
 
-当前任务属于正式阶段：
+当前任务属于：
 
 ```text
-阶段 4A
+阶段 4A-R1
 ```
 
-任务：
+性质：
 
 ```text
-实现参数共享 MAPPO 的完整训练基础设施
+阶段 4A 的算法语义验收修复
+不新增正式阶段
+不开始 4B 正式训练
 ```
 
-阶段 3已正式关闭：
+本轮只修复：
+
+1. 将 joint-action PPO ratio 改为标准的 per-relay ratio；
+2. 将旧动作负 log probability 改为明确的策略 entropy 近似；
+3. 修正无效的 checkpoint 一致性测试；
+4. 增加 MAPPO 概率比和 entropy 的精确测试；
+5. 整理本轮直接修改文件的可读性；
+6. 完成短冒烟验证。
+
+本轮通过后直接进入：
 
 ```text
-实现完成
-性能验收失败
+阶段 4B——MAPPO 固定配置训练与公平比较
 ```
-
-当前 MASAC 保留为失败基线，不再继续进行阶段 3修复。
-
-本轮只完成 MAPPO 的：
-
-1. 网络与算法更新；
-2. On-policy rollout；
-3. GAE；
-4. PPO clipped objective；
-5. 训练与确定性评估；
-6. checkpoint；
-7. 单元和集成测试；
-8. 短程冒烟实验。
-
-本轮不运行 20,000 步正式训练，不进行七策略最终比较。
 
 本轮结果文档必须命名为：
 
 ```text
-STAGE_4A_MAPPO_IMPLEMENTATION_REPORT.md
+STAGE_4A_R1_MAPPO_SEMANTICS_REPAIR_REPORT.md
 ```
 
 ------
 
-## 2. 开始前检查
+## 2. 启动检查
 
-首先运行：
+运行：
 
 ```bash
 git status --short
@@ -54,326 +49,210 @@ git branch --show-current
 git log -3 --oneline
 ```
 
-要求：
+允许且只允许：
 
 ```text
-当前分支为 main
-包含提交 71eb014
-包含报告提交 704c675
-工作区除 M AGENTS.md 外无其他未提交修改
+M AGENTS.md
 ```
 
-`M AGENTS.md` 是本轮授权的执行计划，可以继续。
+该文件是本轮授权计划。
 
-如果存在其他未提交文件：
+如果存在其他未提交文件，立即停止并列出，不自动恢复。
 
-1. 立即停止；
-2. 列出文件；
-3. 不恢复；
-4. 不提交；
-5. 不开始实现。
+确认当前代码包含：
+
+```text
+34ca5b4 feat: implement parameter-sharing MAPPO
+```
 
 ------
 
-## 3. MAPPO 动作语义
+## 3. 修正 Actor 概率接口
 
-MAPPO 的策略动作必须定义为：
-
-```text
-Actor 实际采样的 requested normalized action
-```
-
-安全过滤器仍属于环境状态转移的一部分：
+修改：
 
 ```text
-requested action
-→ 环境安全过滤
-→ applied action
-→ 状态转移
+src/uav_multi_relay/learning/networks.py
 ```
 
-因此 MAPPO rollout 必须保存：
+`SharedGaussianActor.evaluate_actions()` 必须返回：
+
+```python
+per_relay_log_probability
+per_relay_entropy
+```
+
+形状均为：
 
 ```text
-requested_actions
-old_log_probabilities
-applied_actions（仅用于诊断）
+(batch, num_relays, 1)
 ```
 
-PPO 概率比必须基于：
+可以额外返回 joint log probability 用于诊断，但 PPO loss 不得依赖 joint ratio。
+
+### 3.1 per-relay log probability
+
+保持 tanh 反变换和 Jacobian 修正：
+
+```python
+bounded = actions.clamp(-1 + epsilon, 1 - epsilon)
+pre_tanh = atanh(bounded)
+
+per_relay_log_probability = (
+    Normal(mean, std).log_prob(pre_tanh)
+    - log(1 - bounded**2 + epsilon)
+).sum(dim=-1, keepdim=True)
+```
+
+### 3.2 entropy
+
+不得继续使用：
+
+```python
+entropy = -log_probability_of_rollout_action
+```
+
+改为明确的 pre-tanh Gaussian entropy approximation：
+
+```python
+per_relay_entropy = Normal(mean, std).entropy().sum(
+    dim=-1,
+    keepdim=True,
+)
+```
+
+必须在 docstring 和报告中说明：
 
 ```text
-requested_actions
+这是 pre-tanh Gaussian entropy approximation，
+不是精确的 squashed-action entropy。
 ```
 
-不得使用 applied action 反算策略概率，因为 applied action 不是直接从策略分布采样的。
-
-本规则只适用于新实现的 MAPPO。
-
-本轮不得修改：
-
-```text
-MASAC Replay Buffer 的 applied action 语义
-环境安全过滤器
-环境动作接口
-```
-
-结果文档必须明确记录 MAPPO 与当前 MASAC 的动作语义差异，后续公平性问题留到阶段 4消融中处理。
+所有输出必须有限。
 
 ------
 
-## 4. 文件结构
+## 4. Rollout 保存 per-relay old log probability
 
-建议新增：
+修改：
 
 ```text
 src/uav_multi_relay/learning/mappo.py
 src/uav_multi_relay/training/mappo_trainer.py
-src/uav_multi_relay/training/mappo_experiment.py
-src/uav_multi_relay/training/mappo_checkpoints.py
-src/uav_multi_relay/training/mappo_evaluator.py
-scripts/run_mappo_experiment.py
-tests/test_mappo.py
-tests/test_mappo_training.py
-tests/test_mappo_experiment.py
 ```
 
-允许小幅修改：
+将 rollout 中的：
 
 ```text
-src/uav_multi_relay/learning/networks.py
-src/uav_multi_relay/learning/__init__.py
-src/uav_multi_relay/training/__init__.py
-README.md
-AGENTS.md
-```
-
-不得修改：
-
-```text
-src/uav_multi_relay/environment.py
-src/uav_multi_relay/safety.py
-src/uav_multi_relay/kinematics.py
-通信模型
-奖励公式和权重
-MASAC loss
-MASAC Replay Buffer
-现有基线策略
-```
-
-------
-
-## 5. 网络实现
-
-### 5.1 共享 Actor
-
-复用或扩展现有 `SharedGaussianActor`。
-
-必须支持：
-
-```python
-sample(local_observations, deterministic=False)
-evaluate_actions(local_observations, actions)
-```
-
-`evaluate_actions()` 至少返回：
-
-```text
-joint_log_probability
-per_relay_log_probability
-entropy_estimate
-```
-
-输入 action 必须位于：
-
-```text
-[-1, 1]
-```
-
-对 tanh 反变换使用安全裁剪，避免 `atanh(±1)`。
-
-概率计算必须与 `sample()` 中的 tanh Jacobian 修正一致。
-
-### 5.2 集中式 Value Critic
-
-新增：
-
-```python
-CentralizedValueCritic
-```
-
-输入：
-
-```text
-global_state
-```
-
-输出：
-
-```text
-V(s)
-```
-
-要求：
-
-```text
-输入 shape = (batch, global_state_dim)
-输出 shape = (batch, 1)
-输出必须有限
-```
-
-MAPPO 不得复用 MASAC 的 Q Critic 代替 Value Critic。
-
-------
-
-## 6. Rollout 数据结构
-
-实现固定长度 on-policy rollout。
-
-至少保存：
-
-```text
-local_observations
-global_states
-requested_actions
-applied_actions
 old_joint_log_probabilities
-rewards
-values
-next_values
-terminated
-truncated
-advantages
-returns
 ```
 
-要求：
-
-- 数组 shape 明确；
-- 全部数值有限；
-- requested/applied action 均位于 `[-1, 1]`；
-- rollout 满后才允许执行 PPO 更新；
-- 更新完成后必须清空旧 rollout；
-- 不得跨更新周期重复使用旧样本。
-
-`applied_actions` 本轮只用于：
+改为：
 
 ```text
-安全干预率
-requested/applied mismatch
-诊断日志
+old_per_relay_log_probabilities
 ```
 
-不得用于 PPO ratio。
+每一步 shape：
+
+```text
+(K, 1)
+```
+
+完整 rollout shape：
+
+```text
+(rollout_steps, K, 1)
+```
+
+`MAPPOAgent.act_with_stats()` 应返回：
+
+```text
+requested action
+per-relay log probabilities
+value
+```
+
+不得在采集时先求和并丢失 per-relay 数据。
+
+如需要 joint log probability 做诊断，可以从 per-relay 值临时求和，不得作为 PPO ratio 输入。
 
 ------
 
-## 7. GAE 与终止语义
+## 5. 修正 PPO Actor loss
 
-固定默认参数：
+当前团队 advantage shape 为：
 
 ```text
-gamma = 0.99
-gae_lambda = 0.95
+(batch, 1)
 ```
 
-必须正确区分：
-
-### 真实终止
+归一化后广播为：
 
 ```text
-terminated = True
+(batch, K, 1)
 ```
 
-不 bootstrap：
+每个中继分别计算：
 
-```text
-next value contribution = 0
-```
-
-### 时间截断
-
-```text
-truncated = True
-```
-
-允许使用截断前 next observation 的 value bootstrap，但优势递推不得跨 reset 连接到下一个 episode。
-
-实现时区分：
-
-```text
-bootstrap mask = 1 - terminated
-trace continuation mask = 1 - terminated - truncated
-```
-
-必须增加精确数值测试，覆盖：
-
-```text
-普通连续轨迹
-真实终止
-时间截断
-一个 rollout 中包含多个 episode
-```
-
-------
-
-## 8. PPO 更新
-
-实现参数共享 MAPPO 更新，至少包含：
-
-```text
-clipped policy objective
-centralized value loss
-entropy bonus
-advantage normalization
-多 epoch 更新
-mini-batch
-Actor 梯度裁剪
-Value Critic 梯度裁剪
-```
-
-默认配置：
-
-```text
-clip_ratio = 0.2
-update_epochs = 10
-mini_batch_size = 256
-actor_learning_rate = 3e-4
-critic_learning_rate = 3e-4
-value_loss_coefficient = 0.5
-entropy_coefficient = 0.01
-max_gradient_norm = 0.5
-```
-
-策略比率使用：
-
-```text
-ratio = exp(new_joint_log_probability - old_joint_log_probability)
-```
-
-Actor loss 使用：
-
-```text
--min(
-    ratio * advantage,
-    clipped_ratio * advantage
+```python
+ratio = exp(
+    new_per_relay_log_probability
+    - old_per_relay_log_probability
 )
 ```
 
-不得：
+再计算：
+
+```python
+unclipped = ratio * normalized_advantage
+clipped = clamp(
+    ratio,
+    1 - clip_ratio,
+    1 + clip_ratio,
+) * normalized_advantage
+```
+
+Actor surrogate loss：
+
+```python
+surrogate_loss = -minimum(
+    unclipped,
+    clipped,
+).mean()
+```
+
+Entropy bonus：
+
+```python
+entropy_bonus = per_relay_entropy.mean()
+```
+
+最终：
+
+```python
+policy_loss = (
+    surrogate_loss
+    - entropy_coefficient * entropy_bonus
+)
+```
+
+平均范围必须同时覆盖：
 
 ```text
-把 applied action 用于 PPO ratio
-跨 rollout 重复训练旧数据
-对 terminated transition bootstrap
-把 truncated 错当成 terminated
+mini-batch 时间样本
+全部 K 个中继
 ```
+
+不得先将 log probability 在中继维求和后再计算 ratio。
+
+Value Critic、GAE、梯度裁剪和 optimizer 顺序保持不变。
 
 ------
 
-## 9. MAPPO 指标
+## 6. 更新指标
 
-每次更新至少输出：
+继续保留：
 
 ```text
 policy_loss
@@ -391,208 +270,201 @@ requested_applied_mismatch_mean
 requested_applied_mismatch_rate
 ```
 
-所有指标必须：
+定义修正为：
 
-```text
-有限
-可 JSON 序列化
-不得使用 nan_to_num 隐藏异常
+### approx_kl
+
+对 per-relay 值求平均：
+
+```python
+mean(
+    old_per_relay_log_probability
+    - new_per_relay_log_probability
+)
 ```
 
-检测到 NaN 或 Infinity 时立即失败。
+### clip_fraction
+
+对所有：
+
+```text
+batch × relay
+```
+
+元素计算被 clip 的比例。
+
+### entropy
+
+记录：
+
+```text
+per-relay pre-tanh Gaussian entropy 的全体均值
+```
+
+不得把旧动作的负 log probability 命名为 entropy。
 
 ------
 
-## 10. 训练循环
+## 7. Checkpoint 兼容性
 
-新增 MAPPO trainer。
+MAPPO checkpoint 网络结构没有变化，因此格式版本可以保持 `1`。
 
-训练流程：
+必须验证：
 
-```text
-采集 rollout
-→ 计算 GAE 和 returns
-→ 执行 PPO 多 epoch 更新
-→ 清空 rollout
-→ 继续采集
+1. 保存前 Agent 的确定性 action；
+2. 加载后 Agent 的确定性 action；
+3. 保存前 Value Critic 输出；
+4. 加载后 Value Critic 输出；
+5. Actor 参数；
+6. Value Critic 参数；
+7. Actor optimizer state；
+8. Critic optimizer state；
+9. MAPPOConfig；
+10. metadata。
+
+全部一致。
+
+不得继续使用：
+
+```python
+loaded.act(...) == loaded.act(...)
 ```
 
-必须记录：
-
-```text
-environment steps
-completed episodes
-episode return
-episode length
-mean rate
-termination rate
-intervention rate
-requested/applied mismatch
-PPO update metrics
-```
-
-训练 reset seed 规则必须确定且可复现。
-
-不得修改现有 MASAC trainer。
+这种自比较断言。
 
 ------
 
-## 11. 评估
+## 8. 必须新增和修正的测试
 
-新增确定性 MAPPO 评估。
+主要修改：
+
+```text
+tests/test_mappo.py
+tests/test_mappo_training.py
+tests/test_mappo_experiment.py
+```
+
+### 8.1 采样与评估一致
+
+从 Actor 随机采样 requested action，验证：
+
+```text
+sample() 返回的 per-relay log probability
+与
+evaluate_actions() 对同一 action 的 per-relay log probability
+```
+
+逐元素近似相等。
+
+不得只测试 deterministic mean action。
+
+### 8.2 per-relay ratio 精确测试
+
+构造两个中继的固定 old/new log probability，验证 ratio 逐中继计算。
+
+例如：
+
+```text
+relay 1 ratio = 1.1
+relay 2 ratio = 0.9
+```
+
+必须保留两个独立 ratio，不得变成：
+
+```text
+joint ratio = 0.99
+```
+
+### 8.3 `K=1` 等价性
+
+`num_relays=1` 时，per-relay PPO loss 应等于对应单智能体 PPO loss。
+
+### 8.4 中继置换不变性
+
+对 rollout 的 relay 维做相同置换：
+
+```text
+observations
+requested actions
+applied actions
+old log probabilities
+```
+
+在关闭随机 mini-batch 差异或固定 RNG 后，Actor loss 和核心指标应一致。
+
+### 8.5 applied action 隔离
+
+保持 requested action、old log probability 和 RNG 相同，只改变 applied action。
+
+验证：
+
+```text
+Actor 参数更新一致
+Value Critic 参数更新一致
+policy loss 一致
+ratio/clip fraction/approx KL 一致
+```
+
+只允许 mismatch 诊断指标变化。
+
+### 8.6 entropy 测试
+
+验证 entropy：
+
+- shape 为 `(batch, K, 1)`；
+- 全部有限；
+- 增大 `log_std` 时 entropy 增大；
+- 改变 rollout action 但保持策略分布不变时，entropy 不变。
+
+### 8.7 checkpoint 真正往返
+
+保存前记录原 Agent 的 action、value、参数和 optimizer state。
+
+加载后与原 Agent 比较，不得加载后自比较。
+
+### 8.8 partial rollout 行为
+
+保留当前“未满 rollout 不更新”的语义，但必须：
+
+- 在训练 summary 中记录 `discarded_partial_rollout_steps`；
+- 正式实验时能够看出有多少 on-policy 样本未用于更新。
+
+本轮不实现 partial rollout 更新。
+
+------
+
+## 9. 可读性要求
+
+本轮直接修改的 MAPPO 文件不得继续新增一行多个语句的写法。
+
+至少整理：
+
+```text
+networks.py 中新增/修改方法
+mappo.py 中 rollout 与 update
+mappo_trainer.py 中直接相关逻辑
+三个 MAPPO 测试文件
+```
 
 要求：
 
-```text
-使用 Actor mean 对应的 deterministic action
-不更新参数
-不改变训练 RNG
-支持固定 episode seeds
-```
+- 每条主要语句独立一行；
+- 公共类和复杂函数有简短 docstring；
+- 不进行全仓库无关格式化；
+- 不改变未涉及代码的行为。
 
-至少输出：
+顺便修正 README 标题结构：
 
 ```text
-mean return
-return std
-mean rate_e2e_bps
-minimum rate_e2e_bps
-termination rate
-mean episode length
-intervention rate
-requested/applied mismatch rate
+## MAPPO Training
+## MASAC Training
 ```
+
+两部分内容不得混在同一标题下。
 
 ------
 
-## 12. Checkpoint
-
-MAPPO checkpoint 至少保存：
-
-```text
-Actor state
-Value Critic state
-Actor optimizer
-Critic optimizer
-算法配置
-网络维度
-训练 environment steps
-更新次数
-completed episodes
-```
-
-要求：
-
-- 原子写入；
-- 可指定 CPU 加载；
-- 保存加载后 deterministic action 一致；
-- 恢复后 update 可继续执行；
-- 不与 MASAC checkpoint 格式混淆。
-
-MAPPO 使用独立函数和 metadata 类型。
-
-------
-
-## 13. 命令行入口
-
-新增：
-
-```text
-scripts/run_mappo_experiment.py
-```
-
-至少支持：
-
-```text
---output-dir
---steps
---rollout-steps
---max-steps
---waypoint-radius
---update-epochs
---mini-batch-size
---evaluation-interval
---evaluation-episodes
---checkpoint-interval
---seed
---evaluation-seed
---device
---reward-rate
---reward-link
---reward-separation
---reward-intervention
---reward-motion
---reward-failure
-```
-
-输出目录必须为空。
-
-输出至少包含：
-
-```text
-run_config.json
-training_metrics.jsonl
-evaluation_metrics.jsonl
-summary.json
-best_checkpoint.pt
-final_checkpoint.pt
-checkpoints/
-```
-
-不得覆盖已有输出目录。
-
-------
-
-## 14. 必须新增的测试
-
-至少覆盖：
-
-### 网络
-
-- Actor sample shape 和有限性；
-- deterministic action 一致；
-- `evaluate_actions()` 与 sample log probability 一致；
-- 边界 action 不产生 NaN；
-- Value Critic shape 和有限性。
-
-### GAE
-
-- 普通轨迹的精确结果；
-- terminated 不 bootstrap；
-- truncated bootstrap 但不跨 reset；
-- 多 episode rollout。
-
-### PPO 更新
-
-- 参数实际更新；
-- clipped objective 数值正确；
-- advantage normalization；
-- mini-batch 覆盖完整；
-- 所有指标有限；
-- requested action 用于 ratio；
-- applied action 只影响诊断，不改变 ratio。
-
-### Checkpoint
-
-- 保存加载；
-- deterministic action 一致；
-- metadata 一致；
-- 训练可继续；
-- 损坏文件被拒绝。
-
-### 集成
-
-- 短 rollout 完成一次更新；
-- 训练和评估均可运行；
-- 输出文件完整；
-- 非空输出目录被拒绝；
-- 环境终止与截断均可处理。
-
-不得删除或弱化现有 174 项测试。
-
-------
-
-## 15. 验证命令
+## 10. 验证
 
 运行：
 
@@ -612,38 +484,36 @@ python -m pytest -q \
 
 要求：
 
-```text
-所有原测试继续通过
-新增测试全部通过
-测试总数高于 174
-编译成功
-无新增 Pytest 警告
-```
+- 原有 186 项测试全部保留；
+- 新增测试全部通过；
+- 测试总数高于 186；
+- 无新增 Pytest 警告；
+- 编译成功。
 
 ------
 
-## 16. 冒烟实验
+## 11. 冒烟实验
 
 使用新的空目录：
 
 ```text
-outputs/stage4a_mappo_smoke
+outputs/stage4a_r1_mappo_semantics_smoke
 ```
 
-运行一个短实验：
+运行：
 
 ```bash
 python scripts/run_mappo_experiment.py \
-  --output-dir outputs/stage4a_mappo_smoke \
-  --steps 512 \
-  --rollout-steps 128 \
+  --output-dir outputs/stage4a_r1_mappo_semantics_smoke \
+  --steps 1000 \
+  --rollout-steps 250 \
   --max-steps 50 \
   --waypoint-radius 90 \
   --update-epochs 2 \
-  --mini-batch-size 64 \
-  --evaluation-interval 256 \
+  --mini-batch-size 125 \
+  --evaluation-interval 500 \
   --evaluation-episodes 2 \
-  --checkpoint-interval 256 \
+  --checkpoint-interval 500 \
   --reward-rate 1.0 \
   --reward-link 1.0 \
   --reward-separation 1.0 \
@@ -657,108 +527,113 @@ python scripts/run_mappo_experiment.py \
 
 验收：
 
-```text
-完成 512 环境步
-至少完成一次 PPO 更新
-训练指标全部有限
-评估完成
-best/final checkpoint 可加载
-checkpoint deterministic action 一致
-输出 JSON/JSONL 可读取
-```
+1. 完成 1000 环境步；
+2. 完成 4 次 PPO 更新；
+3. `discarded_partial_rollout_steps = 0`；
+4. entropy、KL、clip fraction、梯度全部有限；
+5. best/final checkpoint 可加载；
+6. 保存前后 action 和 value 一致；
+7. JSON/JSONL 全部可读取；
+8. 未修改环境或 MASAC。
 
-冒烟实验不用于判断 MAPPO 性能。
-
-`outputs/` 不得提交 Git。
+冒烟结果不用于性能判断。
 
 ------
 
-## 17. 本轮验收标准
+## 12. 本轮结果文档
 
-本轮通过必须同时满足：
-
-1. MAPPO Actor 和 Value Critic 完成；
-2. requested action 概率语义明确；
-3. rollout 完成；
-4. GAE 正确区分 terminated/truncated；
-5. PPO clipped objective 完成；
-6. checkpoint 完成；
-7. 确定性评估完成；
-8. 原有测试全部通过；
-9. 新增测试全部通过；
-10. 冒烟实验完成；
-11. 未修改环境、奖励和安全过滤；
-12. 未修改 MASAC 行为；
-13. 未进行正式性能宣称；
-14. 结果文档名称正确；
-15. 最终工作区干净。
-
-本轮通过后，下一任务为：
-
-```text
-阶段 4B——MAPPO 固定配置训练与 MASAC 公平比较
-```
-
-------
-
-## 18. 结果文档
-
-将当前结果文档改名为：
+将当前结果文档改名：
 
 ```bash
-git mv STAGE_3G_R4_FINAL_VALIDATION_REPORT.md \
-        STAGE_4A_MAPPO_IMPLEMENTATION_REPORT.md
+git mv STAGE_4A_MAPPO_IMPLEMENTATION_REPORT.md \
+  STAGE_4A_R1_MAPPO_SEMANTICS_REPAIR_REPORT.md
 ```
 
 结果文档至少记录：
 
 ```text
-MAPPO 动作语义
-新增文件
-网络结构
-GAE 终止语义
-PPO 更新公式
-checkpoint 格式
-测试结果
-冒烟实验结果
+旧 joint-ratio 语义
+新 per-relay-ratio 语义
+为什么修正
+old log probability 的新 shape
+entropy 的新定义
+新增测试
+checkpoint 测试修正
+partial rollout 统计
+完整测试结果
+冒烟结果
 是否修改环境或 MASAC
-代码 Commit
-push 状态
-下一建议任务
+代码 Commit 和 push
 ```
 
 仓库根目录最终只保留：
 
 ```text
-STAGE_4A_MAPPO_IMPLEMENTATION_REPORT.md
+STAGE_4A_R1_MAPPO_SEMANTICS_REPAIR_REPORT.md
 ```
 
 ------
 
-## 19. Git 提交
+## 13. 验收标准
 
-代码、测试和文档规则完成后：
+必须同时满足：
+
+1. PPO ratio 按中继分别计算；
+2. 团队 advantage 正确广播；
+3. Actor loss 对 batch 和 relay 维共同平均；
+4. applied action 不参与 PPO ratio；
+5. entropy 不再是旧动作负 log probability；
+6. entropy 定义明确为 pre-tanh Gaussian approximation；
+7. checkpoint 测试比较原 Agent 与加载 Agent；
+8. GAE 语义未改变；
+9. Value Critic 语义未改变；
+10. 完整测试通过；
+11. MAPPO 专项测试通过；
+12. 冒烟实验通过；
+13. 未修改环境、MASAC、奖励和安全过滤；
+14. 最终工作区干净；
+15. CLI 显示结果文档完整名称。
+
+通过后下一任务固定为：
+
+```text
+阶段 4B——MAPPO 固定配置训练与公平比较
+```
+
+------
+
+## 14. Git 提交
+
+代码与测试：
 
 ```bash
 git status --short
-git add src scripts tests AGENTS.md README.md
-git commit -m "feat: implement parameter-sharing MAPPO"
+git add \
+  src/uav_multi_relay/learning/networks.py \
+  src/uav_multi_relay/learning/mappo.py \
+  src/uav_multi_relay/training/mappo_trainer.py \
+  tests/test_mappo.py \
+  tests/test_mappo_training.py \
+  tests/test_mappo_experiment.py \
+  README.md \
+  AGENTS.md
+git commit -m "fix: use per-relay MAPPO probability ratios"
 git push
 ```
 
-记录真实代码 Commit SHA。
+只添加实际修改文件。
 
-结果文档完成后：
+报告：
 
 ```bash
 git add -A
 git status --short
-git commit -m "docs: record stage 4A MAPPO implementation"
+git commit -m "docs: record stage 4A-R1 MAPPO semantics repair"
 git push
 git status --short
 ```
 
-提交前确认没有加入：
+提交前确认未加入：
 
 ```text
 outputs/
@@ -770,17 +645,15 @@ JSON/JSONL 运行产物
 
 ------
 
-## 20. Codex CLI 最终输出
-
-任务结束后必须打印：
+## 15. Codex CLI 最终输出
 
 ```text
 ========================================
-阶段 4A MAPPO 实现结果
+阶段 4A-R1 MAPPO 语义修复结果
 ========================================
 
 本轮结果文档：
-STAGE_4A_MAPPO_IMPLEMENTATION_REPORT.md
+STAGE_4A_R1_MAPPO_SEMANTICS_REPAIR_REPORT.md
 
 代码 Commit SHA：
 <真实 SHA>
@@ -797,10 +670,16 @@ STAGE_4A_MAPPO_IMPLEMENTATION_REPORT.md
 完整测试：
 <真实 passed 数量和耗时>
 
-MAPPO 相关测试：
+MAPPO 专项测试：
 <真实结果>
 
-编译检查：
+PPO ratio 语义：
+per-relay / 未通过
+
+Entropy 定义：
+<真实结果>
+
+Checkpoint 往返：
 <真实结果>
 
 冒烟实验：
@@ -813,33 +692,28 @@ MAPPO 相关测试：
 <真实输出；干净时写 clean>
 
 下一建议任务：
-阶段 4B——MAPPO 固定配置训练与 MASAC 公平比较
+阶段 4B——MAPPO 固定配置训练与公平比较
 
 ========================================
 ```
 
-必须明确显示：
-
-```text
-STAGE_4A_MAPPO_IMPLEMENTATION_REPORT.md
-```
-
 ------
 
-## 21. 禁止事项
+## 16. 禁止事项
 
 本轮禁止：
 
 ```text
-重新修改 MASAC
-修改环境状态转移
-修改安全过滤器
-修改奖励公式或权重默认值
+开始 20,000 步正式训练
+使用 joint-action ratio
 使用 applied action 计算 PPO ratio
-混用 MASAC 与 MAPPO checkpoint
-运行 20,000 步正式训练
-宣称 MAPPO 已优于任何基线
+把旧动作负 log probability 当作 entropy
+修改环境
+修改安全过滤器
+修改奖励
+修改 MASAC
 删除现有测试
 提交 outputs/
+为普通格式问题继续新增修复阶段
 伪造测试、Commit 或 push 结果
 ```

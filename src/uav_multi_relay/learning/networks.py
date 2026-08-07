@@ -100,8 +100,10 @@ class SharedGaussianActor(nn.Module):
     def evaluate_actions(self, local_observations: Tensor, actions: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """Evaluate requested tanh-squashed actions under this policy.
 
-        Returns joint and per-relay log probabilities plus a finite entropy estimate.
-        Clamping is only used for the inverse tanh at the closed action bounds.
+        Return per-relay log probabilities, per-relay pre-tanh Gaussian entropy,
+        and the joint log probability for diagnostics. The entropy is an
+        approximation, not the exact squashed-action entropy. Clamping is used
+        only for the inverse tanh at the closed action bounds.
         """
         mean, log_std = self.forward(local_observations)
         checked_actions = _finite_tensor(actions, "actions")
@@ -113,11 +115,11 @@ class SharedGaussianActor(nn.Module):
         distribution = Normal(mean, log_std.exp())
         correction = torch.log(1.0 - bounded.square() + 1e-6)
         per_relay = (distribution.log_prob(pre_tanh) - correction).sum(dim=-1, keepdim=True)
+        per_relay_entropy = distribution.entropy().sum(dim=-1, keepdim=True)
         joint = per_relay.sum(dim=1)
-        entropy_estimate = -joint
-        if not torch.isfinite(joint).all() or not torch.isfinite(per_relay).all() or not torch.isfinite(entropy_estimate).all():
+        if not torch.isfinite(joint).all() or not torch.isfinite(per_relay).all() or not torch.isfinite(per_relay_entropy).all():
             raise ValueError("action evaluation is non-finite")
-        return joint, per_relay, entropy_estimate
+        return per_relay, per_relay_entropy, joint
 
 
 class CentralizedValueCritic(nn.Module):
