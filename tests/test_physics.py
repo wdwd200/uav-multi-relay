@@ -15,7 +15,8 @@ from uav_multi_relay.communication import (
     snr_linear,
 )
 from uav_multi_relay.core import MotionLimits, UAVState
-from uav_multi_relay.kinematics import advance_state, make_velocity_feasible
+from uav_multi_relay.kinematics import _speed_limit_tolerance, advance_state, make_velocity_feasible
+from uav_multi_relay.safety import velocity_to_normalized_action
 
 
 @pytest.fixture
@@ -91,6 +92,46 @@ def test_velocity_normalizes_reported_horizontal_boundary_rounding() -> None:
         [30.0, 0.0, 0.0], [30.000000000000004, 0.0, 0.0], limits, 0.2
     )
     assert np.linalg.norm(applied[:2]) <= limits.max_horizontal_speed_mps
+
+
+def test_speed_limit_tolerance_is_the_shared_machine_precision_rule() -> None:
+    limit = 30.0
+    assert _speed_limit_tolerance(limit) == pytest.approx(
+        64.0 * np.finfo(float).eps * max(1.0, abs(limit))
+    )
+
+
+@pytest.mark.parametrize(
+    "velocity",
+    [
+        [30.000000000000004, 0.0, 0.0],
+        [np.nextafter(30.0, np.inf), 0.0, 0.0],
+        [0.0, 0.0, np.nextafter(12.0, np.inf)],
+        [0.0, 0.0, np.nextafter(-12.0, -np.inf)],
+    ],
+)
+def test_velocity_entry_points_share_tolerance_for_one_ulp_boundary_values(
+    velocity: object,
+) -> None:
+    limits = MotionLimits(30.0, 12.0, 12.0, 15.0, 8.0)
+    applied = make_velocity_feasible(velocity, velocity, limits, 1.0)
+    action = velocity_to_normalized_action(velocity, limits)
+    assert np.linalg.norm(applied[:2]) <= limits.max_horizontal_speed_mps
+    assert -limits.max_descent_speed_mps <= applied[2] <= limits.max_climb_speed_mps
+    assert np.all(np.isfinite(action))
+    assert np.all(np.abs(action) <= 1.0)
+
+
+@pytest.mark.parametrize(
+    "velocity",
+    [[30.0 + 1e-6, 0.0, 0.0], [0.0, 0.0, 12.0 + 1e-6], [0.0, 0.0, -12.0 - 1e-6]],
+)
+def test_velocity_entry_points_reject_values_beyond_shared_tolerance(velocity: object) -> None:
+    limits = MotionLimits(30.0, 12.0, 12.0, 15.0, 8.0)
+    with pytest.raises(ValueError):
+        make_velocity_feasible([0.0, 0.0, 0.0], velocity, limits, 1.0)
+    with pytest.raises(ValueError):
+        velocity_to_normalized_action(velocity, limits)
 
 
 @pytest.mark.parametrize(

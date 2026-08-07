@@ -13,6 +13,11 @@ def _positive_finite(value: float, name: str) -> float:
     return float(value)
 
 
+def _speed_limit_tolerance(limit: float) -> float:
+    """Return a machine-precision-scale tolerance for one speed limit."""
+    return float(64.0 * np.finfo(float).eps * max(1.0, abs(limit)))
+
+
 def _clip_norm(vector: np.ndarray, maximum: float) -> np.ndarray:
     norm = float(np.linalg.norm(vector))
     if norm <= maximum:
@@ -38,9 +43,9 @@ def make_velocity_feasible(
     requested = _vector3(requested_velocity_mps, "requested_velocity_mps")
     current = _vector3(current_velocity_mps, "current_velocity_mps").copy()
     delta_t = _positive_finite(delta_t_s, "delta_t_s")
-    horizontal_tolerance = 1e-9 * max(1.0, limits.max_horizontal_speed_mps)
-    climb_tolerance = 1e-9 * max(1.0, limits.max_climb_speed_mps)
-    descent_tolerance = 1e-9 * max(1.0, limits.max_descent_speed_mps)
+    horizontal_tolerance = _speed_limit_tolerance(limits.max_horizontal_speed_mps)
+    climb_tolerance = _speed_limit_tolerance(limits.max_climb_speed_mps)
+    descent_tolerance = _speed_limit_tolerance(limits.max_descent_speed_mps)
     horizontal_norm = float(np.linalg.norm(current[:2]))
     if horizontal_norm > limits.max_horizontal_speed_mps + horizontal_tolerance:
         raise ValueError("current_velocity_mps must satisfy the configured speed limits")

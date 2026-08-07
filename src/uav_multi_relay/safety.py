@@ -8,7 +8,7 @@ import numpy as np
 
 from .config import FlightBounds
 from .core import MotionLimits, UAVState, _vector3
-from .kinematics import make_velocity_feasible
+from .kinematics import _speed_limit_tolerance, make_velocity_feasible
 
 
 def _copy_array(value: object, shape: tuple[int, ...], name: str) -> np.ndarray:
@@ -82,9 +82,9 @@ def velocity_to_normalized_action(
     velocity = _vector3(velocity_mps, "velocity_mps")
     horizontal_limit = limits.max_horizontal_speed_mps
     horizontal_norm = float(np.linalg.norm(velocity[:2]))
-    horizontal_tolerance = 1e-9 * max(1.0, horizontal_limit)
-    climb_tolerance = 1e-9 * max(1.0, limits.max_climb_speed_mps)
-    descent_tolerance = 1e-9 * max(1.0, limits.max_descent_speed_mps)
+    horizontal_tolerance = _speed_limit_tolerance(horizontal_limit)
+    climb_tolerance = _speed_limit_tolerance(limits.max_climb_speed_mps)
+    descent_tolerance = _speed_limit_tolerance(limits.max_descent_speed_mps)
     if horizontal_norm > horizontal_limit + horizontal_tolerance:
         raise ValueError("horizontal velocity exceeds the configured limit")
     if velocity[2] > limits.max_climb_speed_mps + climb_tolerance:
