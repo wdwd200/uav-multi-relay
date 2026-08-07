@@ -169,6 +169,8 @@ class EnvironmentConfig:
     high_trajectory: EndpointTrajectoryConfig = field(default_factory=_default_high_trajectory)
     low_trajectory: EndpointTrajectoryConfig = field(default_factory=_default_low_trajectory)
     reward_weights: RewardWeights = field(default_factory=RewardWeights)
+    tdma_mode: str = "optimal"
+    antenna_mode: str = "dipole"
 
     def __post_init__(self) -> None:
         if isinstance(self.num_relays, bool) or not isinstance(self.num_relays, int) or self.num_relays < 1:
@@ -208,6 +210,10 @@ class EnvironmentConfig:
             raise ValueError("low_trajectory must be an EndpointTrajectoryConfig instance")
         if not isinstance(self.reward_weights, RewardWeights):
             raise ValueError("reward_weights must be a RewardWeights instance")
+        if self.tdma_mode not in {"optimal", "equal"}:
+            raise ValueError("tdma_mode must be 'optimal' or 'equal'")
+        if self.antenna_mode not in {"dipole", "isotropic"}:
+            raise ValueError("antenna_mode must be 'dipole' or 'isotropic'")
         lower_altitude = self.flight_bounds.minimum_m[2]
         upper_altitude = self.flight_bounds.maximum_m[2]
         for name, trajectory in (
@@ -264,6 +270,8 @@ def scenario_environment_config(
     waypoint_radius_m: float | None = None,
     max_steps: int | None = None,
     reward_weights: RewardWeights | None = None,
+    tdma_mode: str | None = None,
+    antenna_mode: str | None = None,
 ) -> EnvironmentConfig:
     """Return a validated config with shared training/comparison overrides."""
     if not isinstance(base_config, EnvironmentConfig):
@@ -275,6 +283,10 @@ def scenario_environment_config(
         updates["max_steps"] = max_steps
     if reward_weights is not None:
         updates["reward_weights"] = reward_weights
+    if tdma_mode is not None:
+        updates["tdma_mode"] = tdma_mode
+    if antenna_mode is not None:
+        updates["antenna_mode"] = antenna_mode
     if waypoint_radius_m is not None:
         updates["high_trajectory"] = replace(
             base_config.high_trajectory, waypoint_radius_m=waypoint_radius_m

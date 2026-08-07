@@ -10,6 +10,7 @@ from .communication import (
     channel_power_gain,
     compute_link_geometry,
     dipole_gain,
+    equal_tdma_rate,
     optimal_tdma_rate,
     shannon_capacity_bps,
     snr_linear,
@@ -400,10 +401,14 @@ class MultiRelayEnvironment:
         capacities: list[float] = []
         for tx_position, rx_position in zip(midpoint_positions, midpoint_positions[1:]):
             geometry = compute_link_geometry(tx_position, rx_position)
-            antenna_gain = dipole_gain(
-                geometry.elevation_angle_rad,
-                channel.maximum_antenna_gain_linear,
-                channel.minimum_antenna_gain_linear,
+            antenna_gain = (
+                dipole_gain(
+                    geometry.elevation_angle_rad,
+                    channel.maximum_antenna_gain_linear,
+                    channel.minimum_antenna_gain_linear,
+                )
+                if self.config.antenna_mode == "dipole"
+                else 1.0
             )
             gain = channel_power_gain(
                 geometry.distance_3d_m,
@@ -425,7 +430,11 @@ class MultiRelayEnvironment:
             elevations.append(geometry.elevation_angle_rad)
             capacities.append(shannon_capacity_bps(channel.bandwidth_hz, snr))
         capacities_array = np.asarray(capacities, dtype=float)
-        rate, fractions = optimal_tdma_rate(capacities_array)
+        rate, fractions = (
+            optimal_tdma_rate(capacities_array)
+            if self.config.tdma_mode == "optimal"
+            else equal_tdma_rate(capacities_array)
+        )
         return {
             "distances_m": np.asarray(distances, dtype=float),
             "elevation_angles_rad": np.asarray(elevations, dtype=float),

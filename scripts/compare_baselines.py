@@ -34,6 +34,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=20_000)
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--waypoint-radius", type=float, default=30.0)
+    parser.add_argument("--tdma-mode", choices=("optimal", "equal"), default="optimal")
+    parser.add_argument("--antenna-mode", choices=("dipole", "isotropic"), default="dipole")
     parser.add_argument("--policies", nargs="+", default=["masac", "random", "stationary", "equal_spacing", "weighted_spacing", "greedy", "mpc"])
     parser.add_argument("--greedy-sweeps", type=int, default=1)
     parser.add_argument("--mpc-horizon", type=int, default=2)
@@ -74,6 +76,8 @@ def main() -> None:
         waypoint_radius_m=args.waypoint_radius,
         max_steps=args.max_steps,
         reward_weights=reward_weights,
+        tdma_mode=args.tdma_mode,
+        antenna_mode=args.antenna_mode,
     )
     env = MultiRelayEnvironment(environment_config)
     observation, _ = env.reset(seed=args.seed)
@@ -88,7 +92,7 @@ def main() -> None:
     _prepare_output(output)
     result = compare_policies(env, masac_agent, config, mappo_agent=mappo_agent, matd3_agent=matd3_agent, maddpg_agent=maddpg_agent)
     with (output / "comparison_config.json").open("w", encoding="utf-8") as handle:
-        json.dump({"comparison_config": asdict(config), "agents": {name: None if agent is None else {"num_relays": agent.num_relays, "local_observation_dim": agent.local_observation_dim, "global_state_dim": agent.global_state_dim, "action_dim": agent.action_dim} for name, agent in (("mappo", mappo_agent), ("masac", masac_agent), ("matd3",matd3_agent),("maddpg",maddpg_agent))}, "environment_config": {"waypoint_radius_m": args.waypoint_radius, "max_steps": environment_config.max_steps, "reward_weights": vars(reward_weights)}}, handle, allow_nan=False, indent=2)
+        json.dump({"comparison_config": asdict(config), "agents": {name: None if agent is None else {"num_relays": agent.num_relays, "local_observation_dim": agent.local_observation_dim, "global_state_dim": agent.global_state_dim, "action_dim": agent.action_dim} for name, agent in (("mappo", mappo_agent), ("masac", masac_agent), ("matd3",matd3_agent),("maddpg",maddpg_agent))}, "environment_config": {"waypoint_radius_m": args.waypoint_radius, "max_steps": environment_config.max_steps, "tdma_mode": environment_config.tdma_mode, "antenna_mode": environment_config.antenna_mode, "reward_weights": vars(reward_weights)}}, handle, allow_nan=False, indent=2)
     with (output / "comparison_episodes.jsonl").open("w", encoding="utf-8") as handle:
         for episode in result.episode_results:
             handle.write(json.dumps(asdict(episode), allow_nan=False) + "\n")
