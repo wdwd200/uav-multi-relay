@@ -1,33 +1,45 @@
-# Codex 执行计划：阶段 3G-R4——Critic 梯度裁剪受控修复与阶段 3 最终验收
+# Codex 执行计划：阶段 4A——参数共享 MAPPO 实现
 
 ## 1. 任务性质
 
-当前任务属于：
+当前任务属于正式阶段：
 
 ```text
-阶段 3G-R4
+阶段 4A
 ```
 
-本轮是阶段 3最后一轮修复与性能验收。
-
-本轮结束后只允许两种结论：
+任务：
 
 ```text
-通过阶段 3，进入阶段 4
+实现参数共享 MAPPO 的完整训练基础设施
 ```
 
-或：
+阶段 3已正式关闭：
 
 ```text
-阶段 3实现完成，但性能验收失败，停止继续追加 R 修复
+实现完成
+性能验收失败
 ```
 
-不得再建议 `3G-R5`、`3G-R6` 或新的补充诊断。
+当前 MASAC 保留为失败基线，不再继续进行阶段 3修复。
+
+本轮只完成 MAPPO 的：
+
+1. 网络与算法更新；
+2. On-policy rollout；
+3. GAE；
+4. PPO clipped objective；
+5. 训练与确定性评估；
+6. checkpoint；
+7. 单元和集成测试；
+8. 短程冒烟实验。
+
+本轮不运行 20,000 步正式训练，不进行七策略最终比较。
 
 本轮结果文档必须命名为：
 
 ```text
-STAGE_3G_R4_FINAL_VALIDATION_REPORT.md
+STAGE_4A_MAPPO_IMPLEMENTATION_REPORT.md
 ```
 
 ------
@@ -38,226 +50,549 @@ STAGE_3G_R4_FINAL_VALIDATION_REPORT.md
 
 ```bash
 git status --short
-git log -1 --oneline
+git branch --show-current
+git log -3 --oneline
 ```
 
 要求：
 
-- 当前分支为 `main`；
-- 当前代码包含 `f989dc1`；
-- 工作区干净。
+```text
+当前分支为 main
+包含提交 71eb014
+包含报告提交 704c675
+工作区除 M AGENTS.md 外无其他未提交修改
+```
 
-如果 `git status --short` 有任何输出：
+`M AGENTS.md` 是本轮授权的执行计划，可以继续。
 
-- 立即停止；
-- 列出实际文件；
-- 不自动恢复；
-- 不继续修改或训练。
+如果存在其他未提交文件：
+
+1. 立即停止；
+2. 列出文件；
+3. 不恢复；
+4. 不提交；
+5. 不开始实现。
 
 ------
 
-## 3. 本轮唯一算法修改
+## 3. MAPPO 动作语义
 
-当前诊断已经确认：
-
-```text
-Actor gradient 最大值约 26
-Critic gradient 最大值约 39871
-Critic loss 和 TD error 在训练中后期显著增大
-```
-
-本轮只增加：
+MAPPO 的策略动作必须定义为：
 
 ```text
-Critic 全局梯度范数裁剪
+Actor 实际采样的 requested normalized action
 ```
 
-不得同时修改：
-
-- Critic learning rate；
-- Actor learning rate；
-- 奖励公式或权重；
-- Replay Buffer；
-- Actor/applied action 语义；
-- 网络结构；
-- 安全过滤器；
-- 终止条件。
-
-### 3.1 配置参数
-
-为 `ParameterSharingMASAC` 增加可选参数：
-
-```python
-critic_gradient_clip_norm: float | None = None
-```
-
-规则：
-
-- `None` 表示完全保持现有行为；
-- 非 `None` 时必须是正有限值；
-- 本轮正式候选值固定为：
+安全过滤器仍属于环境状态转移的一部分：
 
 ```text
-1000.0
+requested action
+→ 环境安全过滤
+→ applied action
+→ 状态转移
 ```
 
-### 3.2 更新位置
-
-Critic 更新顺序必须是：
-
-```python
-critic_optimizer.zero_grad(...)
-critic_loss.backward()
-计算裁剪前梯度范数
-clip_grad_norm_(critic.parameters(), critic_gradient_clip_norm)
-计算裁剪后梯度范数
-critic_optimizer.step()
-```
-
-不得改变：
-
-- loss 公式；
-- target Q 公式；
-- backward 次数；
-- optimizer step 次数；
-- Actor 和 alpha 更新顺序。
-
-### 3.3 新增指标
-
-至少记录：
+因此 MAPPO rollout 必须保存：
 
 ```text
-critic_gradient_norm_pre_clip
-critic_gradient_norm_post_clip
-critic_gradient_clip_applied
-critic_gradient_clip_rate
+requested_actions
+old_log_probabilities
+applied_actions（仅用于诊断）
 ```
 
-定义：
+PPO 概率比必须基于：
 
 ```text
-critic_gradient_clip_applied：
-裁剪前范数 > 配置阈值时为 1，否则为 0
-
-critic_gradient_clip_rate：
-日志区间中发生裁剪的更新比例
+requested_actions
 ```
 
-所有值必须有限。
+不得使用 applied action 反算策略概率，因为 applied action 不是直接从策略分布采样的。
+
+本规则只适用于新实现的 MAPPO。
+
+本轮不得修改：
+
+```text
+MASAC Replay Buffer 的 applied action 语义
+环境安全过滤器
+环境动作接口
+```
+
+结果文档必须明确记录 MAPPO 与当前 MASAC 的动作语义差异，后续公平性问题留到阶段 4消融中处理。
 
 ------
 
-## 4. 允许修改的文件
+## 4. 文件结构
 
-主要允许修改：
+建议新增：
 
 ```text
-src/uav_multi_relay/learning/masac.py
-src/uav_multi_relay/training/experiment.py
-src/uav_multi_relay/training/trainer.py
-scripts/run_experiment.py
-tests/test_learning.py
-tests/test_training.py
-tests/test_experiment.py
-AGENTS.md
+src/uav_multi_relay/learning/mappo.py
+src/uav_multi_relay/training/mappo_trainer.py
+src/uav_multi_relay/training/mappo_experiment.py
+src/uav_multi_relay/training/mappo_checkpoints.py
+src/uav_multi_relay/training/mappo_evaluator.py
+scripts/run_mappo_experiment.py
+tests/test_mappo.py
+tests/test_mappo_training.py
+tests/test_mappo_experiment.py
+```
+
+允许小幅修改：
+
+```text
+src/uav_multi_relay/learning/networks.py
+src/uav_multi_relay/learning/__init__.py
+src/uav_multi_relay/training/__init__.py
 README.md
-STAGE_3G_R3_REPRODUCIBILITY_REPAIR_REPORT.md
-STAGE_3G_R4_FINAL_VALIDATION_REPORT.md
+AGENTS.md
 ```
 
-不需要修改的文件不要改动。
-
-禁止修改：
+不得修改：
 
 ```text
-src/uav_multi_relay/kinematics.py
+src/uav_multi_relay/environment.py
 src/uav_multi_relay/safety.py
-环境奖励计算
+src/uav_multi_relay/kinematics.py
 通信模型
-TDMA
-Replay Buffer action 语义
-基线策略
-比较种子
-场景参数
+奖励公式和权重
+MASAC loss
+MASAC Replay Buffer
+现有基线策略
 ```
 
 ------
 
-## 5. 必须新增的测试
+## 5. 网络实现
 
-### 5.1 默认行为不变
+### 5.1 共享 Actor
 
-使用相同初始化、ReplayBatch 和随机状态，对比：
+复用或扩展现有 `SharedGaussianActor`。
 
-```text
-critic_gradient_clip_norm=None
+必须支持：
+
+```python
+sample(local_observations, deterministic=False)
+evaluate_actions(local_observations, actions)
 ```
 
-与修改前的更新结果。
-
-验证：
-
-- Actor 参数一致；
-- Critic 参数一致；
-- Target Critic 参数一致；
-- alpha 一致；
-- optimizer state 一致。
-
-### 5.2 裁剪生效
-
-构造会产生大梯度的 ReplayBatch，设置：
+`evaluate_actions()` 至少返回：
 
 ```text
-critic_gradient_clip_norm=1.0
+joint_log_probability
+per_relay_log_probability
+entropy_estimate
 ```
 
-验证：
+输入 action 必须位于：
 
 ```text
-pre_clip > 1.0
-post_clip <= 1.0 + 数值容差
-critic_gradient_clip_applied = 1
+[-1, 1]
 ```
 
-### 5.3 不需要裁剪
+对 tanh 反变换使用安全裁剪，避免 `atanh(±1)`。
 
-构造小梯度更新，验证：
+概率计算必须与 `sample()` 中的 tanh Jacobian 修正一致。
 
-```text
-pre_clip <= 阈值
-pre_clip 与 post_clip 近似相等
-critic_gradient_clip_applied = 0
+### 5.2 集中式 Value Critic
+
+新增：
+
+```python
+CentralizedValueCritic
 ```
 
-### 5.4 参数校验
-
-以下值必须拒绝：
+输入：
 
 ```text
-0
-负数
-NaN
-Infinity
-布尔值
+global_state
 ```
 
-### 5.5 Checkpoint
-
-保存和加载后必须保留：
+输出：
 
 ```text
-critic_gradient_clip_norm
+V(s)
 ```
 
-旧 checkpoint 没有该字段时应兼容为：
+要求：
 
 ```text
-None
+输入 shape = (batch, global_state_dim)
+输出 shape = (batch, 1)
+输出必须有限
+```
+
+MAPPO 不得复用 MASAC 的 Q Critic 代替 Value Critic。
+
+------
+
+## 6. Rollout 数据结构
+
+实现固定长度 on-policy rollout。
+
+至少保存：
+
+```text
+local_observations
+global_states
+requested_actions
+applied_actions
+old_joint_log_probabilities
+rewards
+values
+next_values
+terminated
+truncated
+advantages
+returns
+```
+
+要求：
+
+- 数组 shape 明确；
+- 全部数值有限；
+- requested/applied action 均位于 `[-1, 1]`；
+- rollout 满后才允许执行 PPO 更新；
+- 更新完成后必须清空旧 rollout；
+- 不得跨更新周期重复使用旧样本。
+
+`applied_actions` 本轮只用于：
+
+```text
+安全干预率
+requested/applied mismatch
+诊断日志
+```
+
+不得用于 PPO ratio。
+
+------
+
+## 7. GAE 与终止语义
+
+固定默认参数：
+
+```text
+gamma = 0.99
+gae_lambda = 0.95
+```
+
+必须正确区分：
+
+### 真实终止
+
+```text
+terminated = True
+```
+
+不 bootstrap：
+
+```text
+next value contribution = 0
+```
+
+### 时间截断
+
+```text
+truncated = True
+```
+
+允许使用截断前 next observation 的 value bootstrap，但优势递推不得跨 reset 连接到下一个 episode。
+
+实现时区分：
+
+```text
+bootstrap mask = 1 - terminated
+trace continuation mask = 1 - terminated - truncated
+```
+
+必须增加精确数值测试，覆盖：
+
+```text
+普通连续轨迹
+真实终止
+时间截断
+一个 rollout 中包含多个 episode
 ```
 
 ------
 
-## 6. 测试和冒烟验证
+## 8. PPO 更新
+
+实现参数共享 MAPPO 更新，至少包含：
+
+```text
+clipped policy objective
+centralized value loss
+entropy bonus
+advantage normalization
+多 epoch 更新
+mini-batch
+Actor 梯度裁剪
+Value Critic 梯度裁剪
+```
+
+默认配置：
+
+```text
+clip_ratio = 0.2
+update_epochs = 10
+mini_batch_size = 256
+actor_learning_rate = 3e-4
+critic_learning_rate = 3e-4
+value_loss_coefficient = 0.5
+entropy_coefficient = 0.01
+max_gradient_norm = 0.5
+```
+
+策略比率使用：
+
+```text
+ratio = exp(new_joint_log_probability - old_joint_log_probability)
+```
+
+Actor loss 使用：
+
+```text
+-min(
+    ratio * advantage,
+    clipped_ratio * advantage
+)
+```
+
+不得：
+
+```text
+把 applied action 用于 PPO ratio
+跨 rollout 重复训练旧数据
+对 terminated transition bootstrap
+把 truncated 错当成 terminated
+```
+
+------
+
+## 9. MAPPO 指标
+
+每次更新至少输出：
+
+```text
+policy_loss
+value_loss
+entropy
+approx_kl
+clip_fraction
+actor_gradient_norm
+critic_gradient_norm
+value_mean
+return_mean
+advantage_mean
+advantage_std
+requested_applied_mismatch_mean
+requested_applied_mismatch_rate
+```
+
+所有指标必须：
+
+```text
+有限
+可 JSON 序列化
+不得使用 nan_to_num 隐藏异常
+```
+
+检测到 NaN 或 Infinity 时立即失败。
+
+------
+
+## 10. 训练循环
+
+新增 MAPPO trainer。
+
+训练流程：
+
+```text
+采集 rollout
+→ 计算 GAE 和 returns
+→ 执行 PPO 多 epoch 更新
+→ 清空 rollout
+→ 继续采集
+```
+
+必须记录：
+
+```text
+environment steps
+completed episodes
+episode return
+episode length
+mean rate
+termination rate
+intervention rate
+requested/applied mismatch
+PPO update metrics
+```
+
+训练 reset seed 规则必须确定且可复现。
+
+不得修改现有 MASAC trainer。
+
+------
+
+## 11. 评估
+
+新增确定性 MAPPO 评估。
+
+要求：
+
+```text
+使用 Actor mean 对应的 deterministic action
+不更新参数
+不改变训练 RNG
+支持固定 episode seeds
+```
+
+至少输出：
+
+```text
+mean return
+return std
+mean rate_e2e_bps
+minimum rate_e2e_bps
+termination rate
+mean episode length
+intervention rate
+requested/applied mismatch rate
+```
+
+------
+
+## 12. Checkpoint
+
+MAPPO checkpoint 至少保存：
+
+```text
+Actor state
+Value Critic state
+Actor optimizer
+Critic optimizer
+算法配置
+网络维度
+训练 environment steps
+更新次数
+completed episodes
+```
+
+要求：
+
+- 原子写入；
+- 可指定 CPU 加载；
+- 保存加载后 deterministic action 一致；
+- 恢复后 update 可继续执行；
+- 不与 MASAC checkpoint 格式混淆。
+
+MAPPO 使用独立函数和 metadata 类型。
+
+------
+
+## 13. 命令行入口
+
+新增：
+
+```text
+scripts/run_mappo_experiment.py
+```
+
+至少支持：
+
+```text
+--output-dir
+--steps
+--rollout-steps
+--max-steps
+--waypoint-radius
+--update-epochs
+--mini-batch-size
+--evaluation-interval
+--evaluation-episodes
+--checkpoint-interval
+--seed
+--evaluation-seed
+--device
+--reward-rate
+--reward-link
+--reward-separation
+--reward-intervention
+--reward-motion
+--reward-failure
+```
+
+输出目录必须为空。
+
+输出至少包含：
+
+```text
+run_config.json
+training_metrics.jsonl
+evaluation_metrics.jsonl
+summary.json
+best_checkpoint.pt
+final_checkpoint.pt
+checkpoints/
+```
+
+不得覆盖已有输出目录。
+
+------
+
+## 14. 必须新增的测试
+
+至少覆盖：
+
+### 网络
+
+- Actor sample shape 和有限性；
+- deterministic action 一致；
+- `evaluate_actions()` 与 sample log probability 一致；
+- 边界 action 不产生 NaN；
+- Value Critic shape 和有限性。
+
+### GAE
+
+- 普通轨迹的精确结果；
+- terminated 不 bootstrap；
+- truncated bootstrap 但不跨 reset；
+- 多 episode rollout。
+
+### PPO 更新
+
+- 参数实际更新；
+- clipped objective 数值正确；
+- advantage normalization；
+- mini-batch 覆盖完整；
+- 所有指标有限；
+- requested action 用于 ratio；
+- applied action 只影响诊断，不改变 ratio。
+
+### Checkpoint
+
+- 保存加载；
+- deterministic action 一致；
+- metadata 一致；
+- 训练可继续；
+- 损坏文件被拒绝。
+
+### 集成
+
+- 短 rollout 完成一次更新；
+- 训练和评估均可运行；
+- 输出文件完整；
+- 非空输出目录被拒绝；
+- 环境终止与截断均可处理。
+
+不得删除或弱化现有 174 项测试。
+
+------
+
+## 15. 验证命令
 
 运行：
 
@@ -266,308 +601,159 @@ python -m pytest
 python -m compileall -q src tests scripts
 ```
 
+再运行：
+
+```bash
+python -m pytest -q \
+  tests/test_mappo.py \
+  tests/test_mappo_training.py \
+  tests/test_mappo_experiment.py
+```
+
 要求：
 
-- 测试数量不得低于 `166`；
-- 全部通过；
-- 无新增警告；
-- 编译成功。
+```text
+所有原测试继续通过
+新增测试全部通过
+测试总数高于 174
+编译成功
+无新增 Pytest 警告
+```
 
-然后运行一个短冒烟训练：
+------
+
+## 16. 冒烟实验
+
+使用新的空目录：
+
+```text
+outputs/stage4a_mappo_smoke
+```
+
+运行一个短实验：
 
 ```bash
-python scripts/run_experiment.py \
-  --output-dir outputs/stage3g_r4_smoke \
-  --steps 100 \
-  --max-steps 20 \
+python scripts/run_mappo_experiment.py \
+  --output-dir outputs/stage4a_mappo_smoke \
+  --steps 512 \
+  --rollout-steps 128 \
+  --max-steps 50 \
   --waypoint-radius 90 \
-  --batch-size 8 \
-  --random-action-steps 8 \
-  --update-after-steps 8 \
-  --updates-per-step 1 \
+  --update-epochs 2 \
+  --mini-batch-size 64 \
+  --evaluation-interval 256 \
+  --evaluation-episodes 2 \
+  --checkpoint-interval 256 \
   --reward-rate 1.0 \
   --reward-link 1.0 \
   --reward-separation 1.0 \
   --reward-intervention 0.1 \
   --reward-motion 0.1 \
   --reward-failure 1.0 \
-  --critic-gradient-clip-norm 1000 \
   --seed 0 \
   --evaluation-seed 10000 \
   --device cpu
 ```
 
-确认：
+验收：
 
-- 所有指标有限；
-- 裁剪前后梯度均被记录；
-- 训练和 checkpoint 可完成。
+```text
+完成 512 环境步
+至少完成一次 PPO 更新
+训练指标全部有限
+评估完成
+best/final checkpoint 可加载
+checkpoint deterministic action 一致
+输出 JSON/JSONL 可读取
+```
+
+冒烟实验不用于判断 MAPPO 性能。
+
+`outputs/` 不得提交 Git。
 
 ------
 
-## 7. 5,000 步受控筛选
+## 17. 本轮验收标准
 
-分别从头运行两个实验。
+本轮通过必须同时满足：
 
-### 7.1 无裁剪对照
+1. MAPPO Actor 和 Value Critic 完成；
+2. requested action 概率语义明确；
+3. rollout 完成；
+4. GAE 正确区分 terminated/truncated；
+5. PPO clipped objective 完成；
+6. checkpoint 完成；
+7. 确定性评估完成；
+8. 原有测试全部通过；
+9. 新增测试全部通过；
+10. 冒烟实验完成；
+11. 未修改环境、奖励和安全过滤；
+12. 未修改 MASAC 行为；
+13. 未进行正式性能宣称；
+14. 结果文档名称正确；
+15. 最终工作区干净。
 
-输出目录：
-
-```text
-outputs/stage3g_r4_screen_control
-```
-
-配置：
-
-```text
-steps = 5000
-critic_gradient_clip_norm = None
-seed = 0
-```
-
-### 7.2 裁剪候选
-
-输出目录：
+本轮通过后，下一任务为：
 
 ```text
-outputs/stage3g_r4_screen_clip1000
-```
-
-配置与对照完全相同，只增加：
-
-```text
-critic_gradient_clip_norm = 1000
-```
-
-固定配置：
-
-```text
-num_relays = 4
-waypoint radius = 90
-max_steps = 250
-batch size = 256
-random action steps = 2000
-update after steps = 2000
-updates per step = 1
-evaluation interval = 2500
-evaluation episodes = 5
-training seed = 0
-evaluation seed = 10000
-```
-
-奖励权重保持：
-
-```text
-rate = 1.0
-link = 1.0
-separation = 1.0
-intervention = 0.1
-motion = 0.1
-failure = 1.0
+阶段 4B——MAPPO 固定配置训练与 MASAC 公平比较
 ```
 
 ------
 
-## 8. 是否进入完整训练的门槛
-
-只有裁剪候选同时满足以下条件，才继续完整 20,000 步训练：
-
-1. 无 NaN 或 Infinity；
-2. `critic_gradient_norm_post_clip <= 1000`；
-3. 5,000 步评估 termination rate 不高于无裁剪对照；
-4. 5,000 步评估 mean return 不低于对照的 90%；
-5. Critic loss 或 TD error 没有比对照明显恶化；
-6. Checkpoint 保存、加载和确定性评估成功。
-
-如果任一条件失败：
-
-```text
-不运行完整 20,000 步
-阶段 3性能验收判定为失败
-停止继续追加修复轮次
-```
-
-报告中必须如实说明：
-
-```text
-Critic 梯度裁剪没有获得继续完整训练的证据
-```
-
-------
-
-## 9. 完整 20,000 步训练
-
-筛选通过后，使用新的空目录：
-
-```text
-outputs/stage3g_r4_final_seed0
-```
-
-运行：
-
-```bash
-python scripts/run_experiment.py \
-  --output-dir outputs/stage3g_r4_final_seed0 \
-  --steps 20000 \
-  --max-steps 250 \
-  --waypoint-radius 90 \
-  --batch-size 256 \
-  --random-action-steps 2000 \
-  --update-after-steps 2000 \
-  --updates-per-step 1 \
-  --log-interval 1000 \
-  --evaluation-interval 2500 \
-  --evaluation-episodes 5 \
-  --checkpoint-interval 2500 \
-  --reward-rate 1.0 \
-  --reward-link 1.0 \
-  --reward-separation 1.0 \
-  --reward-intervention 0.1 \
-  --reward-motion 0.1 \
-  --reward-failure 1.0 \
-  --critic-gradient-clip-norm 1000 \
-  --seed 0 \
-  --evaluation-seed 10000 \
-  --device cpu
-```
-
-不得恢复旧 checkpoint。
-
-不得中途修改参数。
-
-------
-
-## 10. 七策略最终比较
-
-完整训练成功后，使用最佳 checkpoint：
-
-```bash
-python scripts/compare_baselines.py \
-  --checkpoint outputs/stage3g_r4_final_seed0/best_checkpoint.pt \
-  --output-dir outputs/stage3g_r4_final_seed0/comparison \
-  --episodes 10 \
-  --seed 20000 \
-  --max-steps 250 \
-  --waypoint-radius 90 \
-  --reward-rate 1.0 \
-  --reward-link 1.0 \
-  --reward-separation 1.0 \
-  --reward-intervention 0.1 \
-  --reward-motion 0.1 \
-  --reward-failure 1.0 \
-  --policies masac random stationary equal_spacing weighted_spacing greedy mpc \
-  --greedy-sweeps 1 \
-  --mpc-horizon 2 \
-  --mpc-population-size 8 \
-  --mpc-iterations 2 \
-  --device cpu
-```
-
-所有策略必须完成 seeds：
-
-```text
-20000 至 20009
-```
-
-------
-
-## 11. 阶段 3最终判定
-
-阶段 3通过必须同时满足：
-
-```text
-MASAC mean return > stationary mean return
-MASAC mean return > random mean return
-MASAC mean rate >= stationary mean rate
-MASAC termination rate <= stationary termination rate
-```
-
-### 通过时
-
-报告填写：
-
-```text
-阶段 3：通过
-下一任务：阶段 4A
-```
-
-### 未通过时
-
-报告填写：
-
-```text
-阶段 3：实现完成，但性能验收失败
-不再增加阶段 3 修复编号
-下一步：由用户决定进行算法大改，或将 MASAC 保留为失败基线
-```
-
-不得建议 `3G-R5`。
-
-------
-
-## 12. 结果文档
+## 18. 结果文档
 
 将当前结果文档改名为：
 
 ```bash
-git mv STAGE_3G_R3_REPRODUCIBILITY_REPAIR_REPORT.md \
-        STAGE_3G_R4_FINAL_VALIDATION_REPORT.md
+git mv STAGE_3G_R4_FINAL_VALIDATION_REPORT.md \
+        STAGE_4A_MAPPO_IMPLEMENTATION_REPORT.md
 ```
 
-报告至少包含：
+结果文档至少记录：
 
 ```text
-开始 Commit
-修改文件
-新增配置
+MAPPO 动作语义
+新增文件
+网络结构
+GAE 终止语义
+PPO 更新公式
+checkpoint 格式
 测试结果
-5,000 步对照结果
-是否满足完整训练门槛
-完整训练结果（如执行）
-七策略比较（如执行）
-梯度裁剪率
-裁剪前后梯度
-Critic loss 和 TD error
-阶段 3四项条件
-阶段 3最终结论
-Git 和 push 状态
+冒烟实验结果
+是否修改环境或 MASAC
+代码 Commit
+push 状态
+下一建议任务
 ```
 
 仓库根目录最终只保留：
 
 ```text
-STAGE_3G_R4_FINAL_VALIDATION_REPORT.md
+STAGE_4A_MAPPO_IMPLEMENTATION_REPORT.md
 ```
-
-运行产物不得提交 Git。
 
 ------
 
-## 13. Git 提交
+## 19. Git 提交
 
-代码和测试完成后：
+代码、测试和文档规则完成后：
 
 ```bash
 git status --short
-git add src/uav_multi_relay/learning/masac.py \
-        src/uav_multi_relay/training/experiment.py \
-        src/uav_multi_relay/training/trainer.py \
-        scripts/run_experiment.py \
-        tests/test_learning.py \
-        tests/test_training.py \
-        tests/test_experiment.py
-git commit -m "fix: stabilize MASAC critic gradients"
+git add src scripts tests AGENTS.md README.md
+git commit -m "feat: implement parameter-sharing MAPPO"
 git push
 ```
 
-只添加实际修改文件。
+记录真实代码 Commit SHA。
 
-最终报告完成后：
+结果文档完成后：
 
 ```bash
 git add -A
 git status --short
-git commit -m "docs: record final stage 3 validation"
+git commit -m "docs: record stage 4A MAPPO implementation"
 git push
 git status --short
 ```
@@ -577,24 +763,24 @@ git status --short
 ```text
 outputs/
 checkpoint
-JSON/JSONL
+JSON/JSONL 运行产物
 缓存
 临时日志
 ```
 
 ------
 
-## 14. Codex CLI 最终输出
+## 20. Codex CLI 最终输出
 
-Codex 完成后必须打印：
+任务结束后必须打印：
 
 ```text
 ========================================
-阶段 3G-R4 最终验收结果
+阶段 4A MAPPO 实现结果
 ========================================
 
 本轮结果文档：
-STAGE_3G_R4_FINAL_VALIDATION_REPORT.md
+STAGE_4A_MAPPO_IMPLEMENTATION_REPORT.md
 
 代码 Commit SHA：
 <真实 SHA>
@@ -609,52 +795,51 @@ STAGE_3G_R4_FINAL_VALIDATION_REPORT.md
 <真实结果>
 
 完整测试：
+<真实 passed 数量和耗时>
+
+MAPPO 相关测试：
 <真实结果>
 
-5,000 步筛选：
-<通过或未通过及核心数据>
+编译检查：
+<真实结果>
 
-20,000 步训练：
-<已完成、未执行或失败>
+冒烟实验：
+<真实结果>
 
-七策略比较：
-<已完成、未执行或失败>
-
-阶段 3最终结论：
-<通过 / 实现完成但性能验收失败>
-
-下一任务：
-<阶段 4A / 等待用户决定项目路线>
+是否修改环境或 MASAC：
+<真实结果>
 
 最终 git status --short：
 <真实输出；干净时写 clean>
 
+下一建议任务：
+阶段 4B——MAPPO 固定配置训练与 MASAC 公平比较
+
 ========================================
 ```
 
-必须显示完整文件名：
+必须明确显示：
 
 ```text
-STAGE_3G_R4_FINAL_VALIDATION_REPORT.md
+STAGE_4A_MAPPO_IMPLEMENTATION_REPORT.md
 ```
 
 ------
 
-## 15. 禁止事项
+## 21. 禁止事项
 
 本轮禁止：
 
 ```text
-修改奖励
-修改安全过滤
-修改终止条件
-修改 Replay Buffer action 语义
-同时修改多个算法方向
-跳过 5,000 步对照
-筛选不通过仍强行完整训练
-删除失败结果
-继续追加 3G-R5
-进入阶段 4 前伪造通过
+重新修改 MASAC
+修改环境状态转移
+修改安全过滤器
+修改奖励公式或权重默认值
+使用 applied action 计算 PPO ratio
+混用 MASAC 与 MAPPO checkpoint
+运行 20,000 步正式训练
+宣称 MAPPO 已优于任何基线
+删除现有测试
 提交 outputs/
-伪造测试、Commit 或 push 状态
+伪造测试、Commit 或 push 结果
 ```

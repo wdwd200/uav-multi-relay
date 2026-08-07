@@ -97,6 +97,50 @@ class SharedGaussianActor(nn.Module):
         )
         return actions, log_probability
 
+    def evaluate_actions(self, local_observations: Tensor, actions: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Evaluate requested tanh-squashed actions under this policy.
+
+        Returns joint and per-relay log probabilities plus a finite entropy estimate.
+        Clamping is only used for the inverse tanh at the closed action bounds.
+        """
+        mean, log_std = self.forward(local_observations)
+        checked_actions = _finite_tensor(actions, "actions")
+        if checked_actions.shape != mean.shape or torch.any(checked_actions < -1.0) or torch.any(checked_actions > 1.0):
+            raise ValueError("actions must have actor output shape and lie within [-1, 1]")
+        checked_actions = checked_actions.to(dtype=mean.dtype, device=mean.device)
+        bounded = checked_actions.clamp(-1.0 + 1e-6, 1.0 - 1e-6)
+        pre_tanh = torch.atanh(bounded)
+        distribution = Normal(mean, log_std.exp())
+        correction = torch.log(1.0 - bounded.square() + 1e-6)
+        per_relay = (distribution.log_prob(pre_tanh) - correction).sum(dim=-1, keepdim=True)
+        joint = per_relay.sum(dim=1)
+        entropy_estimate = -joint
+        if not torch.isfinite(joint).all() or not torch.isfinite(per_relay).all() or not torch.isfinite(entropy_estimate).all():
+            raise ValueError("action evaluation is non-finite")
+        return joint, per_relay, entropy_estimate
+
+
+class CentralizedValueCritic(nn.Module):
+    """One value estimate from the centralized global state."""
+
+    def __init__(self, global_state_dim: int, hidden_dims: Sequence[int] = (256, 256)) -> None:
+        super().__init__()
+        if global_state_dim <= 0:
+            raise ValueError("global_state_dim must be positive")
+        self.global_state_dim = int(global_state_dim)
+        self.hidden_dims = _validate_hidden_dims(hidden_dims)
+        self.value_net = _mlp(self.global_state_dim, self.hidden_dims, 1)
+
+    def forward(self, global_state: Tensor) -> Tensor:
+        state = _finite_tensor(global_state, "global_state")
+        if state.ndim != 2 or state.shape[-1] != self.global_state_dim:
+            raise ValueError("global_state must have shape (batch, global_state_dim)")
+        state = state.to(dtype=self.value_net[0].weight.dtype, device=self.value_net[0].weight.device)
+        value = self.value_net(state)
+        if not torch.isfinite(value).all():
+            raise ValueError("value critic output is non-finite")
+        return value
+
 
 class CentralizedTwinCritic(nn.Module):
     """Two independent Q networks over global state and flattened joint actions."""
