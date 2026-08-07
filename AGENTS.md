@@ -1,4 +1,4 @@
-# Codex 执行计划：阶段 3G-R3 验收修复
+# Codex 执行计划：阶段 3G-R3——遗留数值容差改动归档与可复现性修复
 
 ## 1. 任务性质
 
@@ -8,534 +8,387 @@
 阶段 3G-R3 验收修复
 ```
 
-性质：
+任务性质：
 
 ```text
-阶段 3 的诊断验收修复
+解决本地已测试代码与 GitHub 已推送代码不一致的问题
 不新增正式阶段
+不得进入阶段 3G-R4
 不得进入阶段 4
-不得开始 3G-R4 的算法修改
 ```
 
-本轮只处理以下问题：
+本轮只处理以下事项：
 
-1. 恢复上一版本中被删除的诊断回归测试；
-2. 保留当前版本新增的 MASAC 诊断测试；
-3. 修正评估 applied action Q 指标的错误命名；
-4. 收紧关于 Critic 外推和数值稳定性的结论；
-5. 从现有训练日志补充 Actor/Critic 梯度轨迹证据；
-6. 按当前阶段名称重新命名结果文档；
-7. Codex 执行结束后，在 CLI 最终输出中明确显示结果文档名称。
+1. 审查工作区中 `kinematics.py` 和 `safety.py` 的既有未提交修改；
+2. 确认修改内容仅为统一速度容差规则；
+3. 补充或确认针对新容差规则的回归测试；
+4. 将经过测试的两个文件正式提交并推送；
+5. 在提交后的干净代码树上重新运行完整测试；
+6. 生成按本轮任务命名的结果文档；
+7. Codex CLI 最终输出明确显示结果文档名称。
 
-本轮不得重新训练 20,000 步。
+本轮不得重新训练 MASAC，不得运行 20,000 步实验，也不得修改诊断算法。
 
 ------
 
-## 2. 当前已确认问题
+## 2. 当前已确认状态
 
-### 2.1 诊断测试发生回退
-
-当前 `tests/test_diagnostics.py` 增加了新的 MASAC 诊断测试，但上一版本中的部分测试被删除。
-
-必须恢复的旧测试包括：
-
-1. `RewardWeights` 默认值检查；
-2. 非法奖励权重校验；
-3. 运动成本只计算受控中继；
-4. 加权奖励和奖励组成项一致性；
-5. failure penalty 使用 failure 权重；
-6. `num_relays=1` 的场景诊断；
-7. `num_relays=4` 的场景诊断；
-8. 场景诊断输出文件禁止覆盖已有文件。
-
-不得为了恢复旧测试而删除当前新增测试。
-
-### 2.2 指标命名不准确
-
-当前诊断脚本将评估 episode 中的 applied action Q 命名为：
+当前工作区存在：
 
 ```text
-replay_applied_action_q_mean
+M src/uav_multi_relay/kinematics.py
+M src/uav_multi_relay/safety.py
 ```
 
-但该动作来自当前确定性评估轨迹的安全过滤结果，不是 Replay Buffer 样本。
-
-因此名称必须修正。
-
-### 2.3 诊断结论存在过度推断
-
-当前结果只能说明：
+这些修改在上一轮开始前已经存在，且参与了上一轮：
 
 ```text
-在最终确定性评估状态下，
-Actor raw action 和 safety-filtered applied action 的平均 Q 差异不显著。
+158 passed
 ```
 
-不能直接得出：
+的测试，但没有包含在上一轮推送到 GitHub 的提交中。
+
+因此目前存在：
 
 ```text
-已经排除 Critic 外推问题。
+实际测试代码 != GitHub 远程代码
 ```
 
-同时，Critic loss 和 TD error 的增大属于高优先级异常迹象，但目前还没有证明它们是高终止率的直接根因。
+本轮必须消除这一可复现性缺口。
 
-### 2.4 结果文档命名不符合新规则
+------
 
-当前固定结果文档名：
+## 3. 预期的既有修改
 
-```text
-CODEX_EXECUTION_REPORT.md
+### 3.1 `kinematics.py`
+
+预期新增统一容差函数：
+
+```python
+def _speed_limit_tolerance(limit: float) -> float:
+    return float(64.0 * np.finfo(float).eps * max(1.0, abs(limit)))
 ```
 
-不再使用。
-
-本轮结果文档必须根据阶段和任务命名为：
+并将以下三个速度容差：
 
 ```text
-STAGE_3G_R3_ACCEPTANCE_REPAIR_REPORT.md
+horizontal tolerance
+climb tolerance
+descent tolerance
+```
+
+统一改为调用该函数。
+
+### 3.2 `safety.py`
+
+预期修改导入：
+
+```python
+from .kinematics import _speed_limit_tolerance, make_velocity_feasible
+```
+
+并在 `velocity_to_normalized_action()` 中复用同一容差函数。
+
+### 3.3 本轮不得混入其他行为变化
+
+两个文件中不得额外修改：
+
+```text
+速度投影算法
+加速度限制
+状态推进
+安全过滤插值次数
+候选位置计算
+安全距离
+链路距离
+异常类型
+动作映射公式
+```
+
+如果实际 diff 中存在上述范围之外的修改，立即停止，不得提交，并在 CLI 中报告实际差异。
+
+------
+
+## 4. 首先检查真实差异
+
+Codex 开始后先运行：
+
+```bash
+git status --short
+git diff -- src/uav_multi_relay/kinematics.py src/uav_multi_relay/safety.py
+git diff --check
+```
+
+必须确认：
+
+1. 只有预期的统一容差修改；
+2. 没有调试代码；
+3. 没有临时打印；
+4. 没有无关格式化；
+5. 没有大范围换行变化；
+6. `git diff --check` 无空白错误。
+
+将实际 diff 摘要记录到结果文档。
+
+------
+
+## 5. 容差规则验收要求
+
+新规则为：
+
+```python
+64.0 * np.finfo(float).eps * max(1.0, abs(limit))
+```
+
+该规则只用于吸收浮点舍入误差。
+
+必须满足：
+
+1. `30.000000000000004 m/s` 在 30 m/s 上限下被接受；
+2. 接受后速度规范化到不超过精确上限；
+3. `np.nextafter(limit, np.inf)` 被接受；
+4. 最大上升速度的一 ULP 超限被接受并裁剪；
+5. 最大下降速度的一 ULP 超限被接受并裁剪；
+6. 明显超过容差的速度仍抛出 `ValueError`；
+7. `make_velocity_feasible()` 与 `velocity_to_normalized_action()` 使用相同容差定义。
+
+不得使用更宽的固定容差替代该规则。
+
+------
+
+## 6. 测试要求
+
+先检查现有测试是否已经完整覆盖以下情况。
+
+至少必须覆盖：
+
+### 6.1 水平边界
+
+```text
+精确上限
+np.nextafter(max_horizontal_speed, +inf)
+实际复现值 30.000000000000004
+明显超过新容差
+```
+
+### 6.2 垂直边界
+
+```text
+最大上升速度的一 ULP 超限
+最大下降速度的一 ULP 超限
+明显超过上升容差
+明显超过下降容差
+```
+
+### 6.3 两个模块的一致性
+
+增加或确认存在一个测试，验证：
+
+```text
+make_velocity_feasible() 接受的容差内速度
+velocity_to_normalized_action() 也能够接受
+```
+
+以及：
+
+```text
+超过容差的速度
+两个入口均拒绝
+```
+
+### 6.4 回归场景
+
+保留并运行：
+
+```text
+greedy
+seed = 20004
+30 次环境调用
+```
+
+该测试只允许表述为：
+
+```text
+跨必要 reset 的 30 次环境调用不再触发速度边界 ValueError
+```
+
+不得重新写成：
+
+```text
+同一 episode 连续成功运行 30 步
+```
+
+### 6.5 禁止事项
+
+不得：
+
+```text
+删除已有测试
+弱化明显超限测试
+仅验证不抛异常
+使用 mock 绕过速度函数
+修改环境终止逻辑
 ```
 
 ------
 
-## 3. 允许修改的文件
-
-主要允许修改：
-
-```text
-tests/test_diagnostics.py
-scripts/diagnose_masac.py
-AGENTS.md
-README.md
-CODEX_EXECUTION_REPORT.md
-aaa.md
-STAGE_3G_R3_ACCEPTANCE_REPAIR_REPORT.md
-```
-
-如诊断摘要由其他文件生成，可以修改直接相关的报告生成代码，但必须保持最小范围。
-
-除非测试发现直接相关错误，否则不得修改：
-
-```text
-MASAC loss
-MASAC 更新顺序
-Actor 网络结构
-Critic 网络结构
-Target Critic 更新方式
-Replay Buffer
-Replay Buffer 中 applied action 的保存语义
-奖励公式
-奖励权重
-安全过滤器
-运动模型
-通信模型
-TDMA 模型
-环境状态转移
-终止条件
-固定训练配置
-```
-
-------
-
-## 4. 恢复并合并诊断测试
-
-以提交 `6fc0ba8` 中原有的 `tests/test_diagnostics.py` 为参考，恢复被删除的旧测试。
-
-同时保留当前版本中的新增测试，包括：
-
-1. interval action 统计；
-2. requested/applied action mismatch；
-3. reward contribution 分解；
-4. 周期 checkpoint；
-5. failure trace；
-6. 诊断 RNG 不改变更新结果；
-7. MASACUpdateMetrics 有限性。
-
-实现要求：
-
-- 不得使用旧文件整体覆盖新文件；
-- 必须把两组测试合并；
-- 测试函数重名时应重新命名；
-- 不得删除测试来获得全绿；
-- 不得弱化已有断言；
-- 不得把精确断言改成只验证“不抛异常”。
-
-合并后，`tests/test_diagnostics.py` 至少应覆盖：
-
-```text
-奖励权重配置
-奖励计算
-失败惩罚
-场景诊断
-输出文件保护
-动作区间统计
-奖励贡献统计
-失败轨迹
-周期 checkpoint
-诊断有限性
-诊断不改变随机数和参数更新
-```
-
-------
-
-## 5. 修正评估 Q 指标命名
-
-在 `scripts/diagnose_masac.py` 中，将评估阶段的字段：
-
-```text
-replay_applied_action_q_mean
-actor_raw_minus_replay_q_mean
-```
-
-修改为：
-
-```text
-evaluation_applied_action_q_mean
-actor_raw_minus_evaluation_applied_q_mean
-```
-
-同步修改：
-
-```text
-JSON 输出字段
-JSONL 输出字段
-Markdown 诊断摘要
-结果文档
-相关测试
-变量名称
-文字说明
-```
-
-注意：
-
-如果 `MASACUpdateMetrics` 中存在真正基于 ReplayBatch 计算的：
-
-```text
-replay_action_q_mean
-```
-
-该名称是正确的，不得全局替换。
-
-修复后必须明确区分：
-
-```text
-Replay Buffer sampled applied action Q
-```
-
-和：
-
-```text
-Current evaluation trajectory applied action Q
-```
-
-------
-
-## 6. 修正诊断结论
-
-诊断摘要和结果文档中不得继续写：
-
-```text
-已排除 Critic 外推
-```
-
-应修改为：
-
-```text
-最终确定性评估状态下，Actor raw action 与 safety-filtered applied action
-的平均 Q 差异不显著。
-
-该结果不能排除训练全过程中，或 Replay Buffer 动作分布之外的
-Critic 外推问题。
-```
-
-对于 Critic 稳定性，必须分成三个层次。
-
-### 6.1 已确认事实
-
-至少包括：
-
-```text
-critic loss 在训练中后期明显增大
-TD error 在训练中后期增大
-已记录的 Q、loss、TD error 和梯度均为有限值
-Q1、Q2 和 target Q 的均值没有发生明显分离
-```
-
-### 6.2 高优先级假设
-
-可以写：
-
-```text
-Critic 更新尺度可能不稳定
-```
-
-### 6.3 尚未确认
-
-必须写：
-
-```text
-尚未证明 Critic 更新尺度异常是高终止率的直接根因
-尚未证明动作过滤失配是 Critic 异常的主要原因
-尚未证明 failure penalty 过小直接导致策略失败
-```
-
-不得在本轮提前确定 `3G-R4` 一定修改 Critic、奖励或动作语义。
-
-------
-
-## 7. 补充梯度和更新尺度证据
-
-从现有目录读取：
-
-```text
-outputs/stage3g_r3_seed0_diagnostic/training_metrics.jsonl
-```
-
-至少提取以下字段：
-
-```text
-actor_gradient_norm
-critic_gradient_norm
-critic_loss
-td_error_mean
-td_error_p95
-td_error_max
-q1_mean
-q2_mean
-target_q_mean
-alpha
-```
-
-每个主要字段至少报告：
-
-```text
-第一个有效值
-最大值
-最大值对应的 environment step
-最后一个有效值
-是否全部有限
-是否存在持续增长
-是否存在单点尖峰
-```
-
-梯度至少需要明确报告：
-
-```text
-actor_gradient_norm 初始有效值
-actor_gradient_norm 最大值及 step
-actor_gradient_norm 最终值
-
-critic_gradient_norm 初始有效值
-critic_gradient_norm 最大值及 step
-critic_gradient_norm 最终值
-```
-
-不得只写：
-
-```text
-梯度变大
-梯度异常
-梯度不稳定
-```
-
-必须给出真实数值和对应步数。
-
-如果日志字段在部分 step 中为空，应忽略尚未开始训练更新的区间，但必须说明第一个有效值出现在哪一步。
-
-如果以下任一情况发生：
-
-```text
-训练目录不存在
-training_metrics.jsonl 不存在
-所需字段不存在
-日志无法解析
-出现 NaN
-出现 Infinity
-```
-
-必须停止正式结果生成，并在结果文档中如实说明。
-
-不得自动重新运行 20,000 步训练。
-
-------
-
-## 8. 使用现有训练结果重新生成诊断
-
-不得重新训练。
-
-使用现有目录：
-
-```text
-outputs/stage3g_r3_seed0_diagnostic
-```
-
-创建新的空输出目录：
-
-```text
-outputs/stage3g_r3_acceptance_repair_diagnostics
-```
+## 7. 代码提交前验证
 
 运行：
 
 ```bash
-python scripts/diagnose_masac.py \
-  --run-dir outputs/stage3g_r3_seed0_diagnostic \
-  --output-dir outputs/stage3g_r3_acceptance_repair_diagnostics \
-  --evaluation-episodes 5 \
-  --evaluation-seed 10000 \
-  --comparison-episodes 10 \
-  --comparison-seed 20000 \
-  --device cpu
+python -m pytest -q tests/test_physics.py tests/test_environment.py
+python -m compileall -q src tests scripts
 ```
 
-确认：
-
-- 所有 JSON 文件可读取；
-- 所有 JSONL 文件可逐行读取；
-- 不存在 NaN；
-- 不存在 Infinity；
-- 新字段名称正确；
-- 旧错误字段名称不再出现；
-- 梯度轨迹进入诊断摘要；
-- 不修改原有 checkpoint；
-- 不修改原始训练日志；
-- 不改变原有训练结果。
-
-新输出目录不得提交 Git。
-
-------
-
-## 9. 测试与编译
-
-先运行完整测试：
+然后运行完整测试：
 
 ```bash
 python -m pytest
 ```
 
-再运行编译检查：
-
-```bash
-python -m compileall -q src tests scripts
-```
-
-然后单独运行相关测试：
-
-```bash
-python -m pytest -q \
-  tests/test_diagnostics.py \
-  tests/test_learning.py \
-  tests/test_environment.py
-```
-
 要求：
 
-1. 所有旧诊断测试恢复；
-2. 所有新诊断测试保留；
-3. 测试总数应高于本轮开始时的 `150 passed`；
-4. 不得删除或跳过已有测试；
-5. 不得新增无理由的 `xfail`；
-6. 不得通过降低断言精度获得通过；
-7. 编译检查必须成功；
-8. 所有警告必须记录；
-9. 测试失败时不得继续生成“completed”状态报告。
+```text
+全部测试通过
+测试数量不得低于 158
+无新增 Pytest 警告
+编译检查成功
+```
+
+记录真实测试数量和耗时。
+
+如果测试失败：
+
+```text
+不得提交
+不得修改算法绕过测试
+仍停留在本任务
+```
 
 ------
 
-## 10. 结果文档命名规则
+## 8. 提交既有代码修改
+
+确认 diff 和测试通过后，执行：
+
+```bash
+git status --short
+git add src/uav_multi_relay/kinematics.py \
+        src/uav_multi_relay/safety.py
+```
+
+如果本轮新增或修改了相关测试，再添加真实测试文件，例如：
+
+```bash
+git add tests/test_physics.py tests/test_environment.py
+```
+
+提交前运行：
+
+```bash
+git diff --cached --check
+git diff --cached --stat
+```
+
+提交：
+
+```bash
+git commit -m "fix: unify floating-point speed limit tolerances"
+```
+
+推送：
+
+```bash
+git push
+```
+
+记录真实代码 Commit SHA。
+
+------
+
+## 9. 提交后重新验证
+
+代码提交并推送后，必须确认源文件不再有未提交差异：
+
+```bash
+git status --short
+git diff --exit-code -- \
+  src/uav_multi_relay/kinematics.py \
+  src/uav_multi_relay/safety.py
+```
+
+随后在提交后的代码树上再次运行：
+
+```bash
+python -m pytest
+python -m compileall -q src tests scripts
+```
+
+目的：
+
+```text
+证明测试使用的代码与已提交、已推送代码完全一致
+```
+
+如果提交后两个源文件再次显示 `M`：
+
+```text
+立即停止
+不得继续生成 completed 报告
+必须查明是工具自动改写、换行变化还是其他修改
+```
+
+------
+
+## 10. 本轮结果文档
 
 本轮结果文档必须命名为：
+
+```text
+STAGE_3G_R3_REPRODUCIBILITY_REPAIR_REPORT.md
+```
+
+将上一轮当前结果文档：
 
 ```text
 STAGE_3G_R3_ACCEPTANCE_REPAIR_REPORT.md
 ```
 
-不得继续使用：
-
-```text
-aaa.md
-CODEX_EXECUTION_REPORT.md
-```
-
-处理规则：
+改名为本轮结果文档：
 
 ```bash
-git rm aaa.md
-git mv CODEX_EXECUTION_REPORT.md STAGE_3G_R3_ACCEPTANCE_REPAIR_REPORT.md
+git mv STAGE_3G_R3_ACCEPTANCE_REPAIR_REPORT.md \
+        STAGE_3G_R3_REPRODUCIBILITY_REPAIR_REPORT.md
 ```
 
-如果实际文件状态与上述命令不一致，应先运行：
-
-```bash
-git status --short
-```
-
-然后根据真实状态处理。
-
-不得伪造：
+仓库根目录最终只保留：
 
 ```text
-文件已删除
-文件已改名
-git mv 成功
+STAGE_3G_R3_REPRODUCIBILITY_REPAIR_REPORT.md
 ```
 
-最终仓库根目录必须满足：
-
-```text
-不存在 aaa.md
-不存在 CODEX_EXECUTION_REPORT.md
-存在 STAGE_3G_R3_ACCEPTANCE_REPAIR_REPORT.md
-```
-
-历史结果由 Git 历史保存，不要求在仓库根目录长期保留旧报告。
+历史报告由 Git 历史保存。
 
 ------
 
-## 11. 更新长期文档规则
+## 11. 结果文档内容
 
-在 `AGENTS.md` 中写入以下永久规则：
-
-1. 每轮结果文档必须根据当前阶段和任务命名；
-2. 文件名格式：
-
-```text
-STAGE_<阶段编号>_<简短任务名>_REPORT.md
-```
-
-1. 文件名使用大写英文字母和下划线；
-2. 每份计划必须提前给出本轮精确结果文档名称；
-3. Codex 不得自行决定结果文档名称；
-4. 仓库根目录只保留当前轮结果文档；
-5. 历史报告通过 Git 历史查看；
-6. Codex CLI 最终输出必须明确打印结果文档完整文件名；
-7. 不再使用固定名称：
-
-```text
-aaa.md
-CODEX_EXECUTION_REPORT.md
-```
-
-同步修改 README 中所有仍指向旧结果文档的说明。
-
-------
-
-## 12. 本轮结果文档内容
-
-`STAGE_3G_R3_ACCEPTANCE_REPAIR_REPORT.md` 至少包含以下内容：
+结果文档至少包含：
 
 ```markdown
 ---
 schema_version: 1
 stage: 3G-R3
-task_type: acceptance_repair
+task_type: reproducibility_repair
 status: completed
 branch: main
-code_commit: <代码提交 SHA>
+code_commit: <真实代码 SHA>
 code_push_status: pushed
 report_commit: self
 ---
 
-# Stage 3G-R3 Acceptance Repair Report
+# Stage 3G-R3 Reproducibility Repair Report
 
 ## 1. 本轮任务
 - 阶段：
@@ -545,254 +398,97 @@ report_commit: self
 - 开始代码基线：
 - 结束代码基线：
 
-## 2. 修改文件
-- 新增：
-- 修改：
-- 删除：
-- 改名：
+## 2. 遗留工作区修改
+- 开始时 git status：
+- 涉及文件：
+- 修改来源是否可确认：
+- 实际 diff 摘要：
+- 是否包含无关修改：
 
-## 3. 测试恢复
-- 恢复的旧测试：
-- 保留的新测试：
-- 测试总数变化：
-- 是否删除测试：
+## 3. 数值容差规则
+- 旧容差规则：
+- 新容差规则：
+- 30 m/s 对应的新容差：
+- 原始复现值：
+- 是否仍能接受原始复现值：
+- 明显超限是否仍被拒绝：
 
-## 4. 指标命名修正
-- 旧字段：
-- 新字段：
-- 修改原因：
-- Replay action 和 evaluation applied action 的区别：
+## 4. 测试结果
+- 提交前相关测试：
+- 提交前完整测试：
+- 提交后完整测试：
+- 编译检查：
+- 最终测试数量：
+- 警告：
+- greedy seed 20004 回归结果：
 
-## 5. 梯度与更新尺度
-- Actor gradient 初始值：
-- Actor gradient 最大值及 step：
-- Actor gradient 最终值：
-- Critic gradient 初始值：
-- Critic gradient 最大值及 step：
-- Critic gradient 最终值：
-- Critic loss 初始/最大/最终：
-- TD error 初始/最大/最终：
-- 是否全部有限：
-- 是否存在持续增长：
-- 是否存在尖峰：
+## 5. 可复现性检查
+- 测试代码 Commit：
+- 代码是否推送：
+- 提交后源文件是否仍有 diff：
+- 测试代码是否等于远程代码：
+- 最终工作区状态：
 
-## 6. 修正后的诊断结论
-- 已确认事实：
-- 高优先级假设：
-- 尚未确认：
-- 已排除：
-- Critic 外推是否被排除：
-- 动作过滤失配是否被确认：
-- 奖励尺度是否被确认：
-
-## 7. 验证结果
-- 完整测试命令：
-- 完整测试结果：
-- 相关测试结果：
-- 编译结果：
-- JSON/JSONL 检查：
-- NaN/Infinity 检查：
-- 诊断输出目录：
-
-## 8. 阶段判定
+## 6. 阶段判定
 - 阶段 3G 是否通过：
-- 阶段 3G-R3 是否验收通过：
+- 本轮修复是否通过：
 - 是否允许进入阶段 4：
 - 下一建议任务：
-- 下一任务依据：
 
-## 9. Git 状态
+## 7. Git 状态
 - 代码 Commit：
-- 代码是否推送：
+- 代码 push：
 - 报告 Commit：self
-- 报告是否推送：
-- 最终工作区状态：
+- 报告 push：
 - Git 异常：
-- 未提交输出目录：
+- 未提交文件：
 - 计划偏差：
 ```
 
-不得在报告中写：
+报告不得声称能够确认这些遗留修改最初由谁产生。
+
+只能写：
 
 ```text
-本报告待提交
-本报告待推送
-报告 Commit ID 待补
+这些修改在本轮开始前已经存在
 ```
 
-报告自身所在提交使用：
-
-```text
-report_commit: self
-```
-
-报告提交的真实 SHA 在 Codex CLI 最终输出中单独显示。
+除非 Git、Codex 日志或其他直接证据能够证明来源。
 
 ------
 
-## 13. 本轮验收标准
+## 12. 报告提交
 
-必须同时满足：
-
-1. 上一版本被删除的诊断测试全部恢复；
-2. 当前新增诊断测试全部保留；
-3. 完整测试通过；
-4. 测试数量高于 `150 passed`；
-5. 编译检查通过；
-6. 评估 applied action Q 不再错误命名为 replay Q；
-7. JSON 和 Markdown 中旧错误字段全部消失；
-8. Critic 外推结论不再过度推断；
-9. 结果文档包含真实 Actor/Critic 梯度数字；
-10. 结果文档区分已确认事实、假设和未确认结论；
-11. 未修改 MASAC 算法行为；
-12. 未修改奖励；
-13. 未修改安全过滤；
-14. 未重新训练；
-15. 未提交 `outputs/`；
-16. 根目录不存在 `aaa.md`；
-17. 根目录不存在 `CODEX_EXECUTION_REPORT.md`；
-18. 根目录存在：
-
-```text
-STAGE_3G_R3_ACCEPTANCE_REPAIR_REPORT.md
-```
-
-1. Codex CLI 最终输出显示结果文档完整名称；
-2. Git 提交和推送状态真实可核对。
-
-如果任何一项未满足：
-
-```text
-仍停留在阶段 3G-R3
-不得进入阶段 3G-R4
-不得进入阶段 4
-```
-
-------
-
-## 14. 下一任务判定
-
-本轮验收通过后，根据修正后的证据选择下一任务。
-
-### 情况 A：Critic 梯度、loss 和 TD error 明显持续增长
-
-下一建议：
-
-```text
-阶段 3G-R4——MASAC Critic 更新尺度与数值稳定性修复
-```
-
-### 情况 B：梯度稳定，但 requested/applied action 长期失配仍显著
-
-下一建议：
-
-```text
-阶段 3G-R4——Actor、Critic 与安全过滤动作语义一致性修复
-```
-
-### 情况 C：算法数值基本稳定，总 return 主要由终止惩罚和 episode 长度主导
-
-下一建议：
-
-```text
-阶段 3G-R4——奖励尺度与终止指标受控实验
-```
-
-### 情况 D：证据仍不足
-
-下一建议：
-
-```text
-阶段 3G-R3 补充诊断
-```
-
-不得在一轮中同时修改 Critic、动作语义和奖励。
-
-不得建议进入阶段 4。
-
-------
-
-## 15. Git 提交
-
-### 15.1 代码和测试提交
-
-先运行：
+完成结果文档后运行：
 
 ```bash
+git add STAGE_3G_R3_REPRODUCIBILITY_REPAIR_REPORT.md
 git status --short
 ```
 
-确认只包含本轮允许修改的代码和测试文件。
+如 README 或 AGENTS 中存在旧结果文档文件名引用，才允许同步修改并添加。
 
-添加：
-
-```bash
-git add tests/test_diagnostics.py scripts/diagnose_masac.py
-```
-
-如实际还修改了直接相关的诊断生成代码，应按真实文件添加。
-
-提交：
-
-```bash
-git commit -m "fix: complete stage 3G-R3 diagnostic validation"
-```
-
-推送：
-
-```bash
-git push
-```
-
-记录真实代码 Commit SHA 和推送结果。
-
-### 15.2 报告和规则提交
-
-完成以下内容：
-
-```text
-删除 aaa.md
-改名 CODEX_EXECUTION_REPORT.md
-生成 STAGE_3G_R3_ACCEPTANCE_REPAIR_REPORT.md
-更新 AGENTS.md
-更新 README.md
-```
-
-然后运行：
-
-```bash
-git add -A
-git status --short
-```
-
-提交前检查暂存区，确保没有加入：
+提交前确保没有加入：
 
 ```text
 outputs/
 checkpoint
-JSON
-JSONL
+JSON/JSONL 运行产物
 .pytest_cache/
 __pycache__/
-临时文件
-日志文件
+临时日志
 ```
 
 提交：
 
 ```bash
-git commit -m "docs: record stage 3G-R3 acceptance repair"
+git commit -m "docs: record stage 3G-R3 reproducibility repair"
 ```
 
 推送：
 
 ```bash
 git push
-```
-
-最后运行：
-
-```bash
 git status --short
 ```
 
@@ -800,9 +496,69 @@ git status --short
 
 ------
 
-## 16. Git 异常处理
+## 13. 本轮验收标准
 
-如果任何 Git 命令触发 `git.exe` 内存读取错误或类似系统异常：
+必须同时满足：
+
+1. 两个遗留源文件的真实 diff 已核对；
+2. diff 只包含统一速度容差修改；
+3. 新容差仍接受原始浮点舍入值；
+4. 明显超限仍被拒绝；
+5. 两个模块使用同一容差规则；
+6. 相关测试通过；
+7. 完整测试通过；
+8. 测试数量不低于 158；
+9. 编译检查通过；
+10. 源代码修改已提交；
+11. 源代码修改已推送；
+12. 提交后重新运行完整测试；
+13. 提交后两个源文件不再显示 `M`；
+14. 测试代码与 GitHub 远程代码一致；
+15. 未重新训练；
+16. 未修改 MASAC、奖励或安全过滤行为；
+17. 根目录结果文档为：
+
+```text
+STAGE_3G_R3_REPRODUCIBILITY_REPAIR_REPORT.md
+```
+
+1. Codex CLI 最终输出显示结果文档完整名称；
+2. 最终 `git status --short` 干净。
+
+任何一项不满足：
+
+```text
+仍停留在阶段 3G-R3 可复现性修复
+不得开始补充诊断
+不得进入 3G-R4
+不得进入阶段 4
+```
+
+------
+
+## 14. 下一任务
+
+本轮验收通过后，下一建议任务应为：
+
+```text
+阶段 3G-R3——Critic 更新尺度与终止因果关系补充诊断
+```
+
+该任务只做补充诊断，用于决定后续 `3G-R4` 应优先修复：
+
+```text
+Critic 更新尺度
+动作语义一致性
+奖励与终止尺度
+```
+
+本轮不得提前实施上述算法修复。
+
+------
+
+## 15. Git 异常处理
+
+如果任何 Git 命令触发 `git.exe` 内存读取错误：
 
 1. 立即停止 Git 操作；
 2. 不自动重试；
@@ -810,32 +566,33 @@ git status --short
 4. 不运行 `git gc`；
 5. 不运行 `git prune`；
 6. 记录触发错误的完整命令；
-7. 如实记录代码是否已提交；
-8. 如实记录代码是否已推送；
-9. 如实记录报告是否已提交；
-10. 如实记录报告是否已推送；
-11. 不虚构 Commit SHA；
-12. 不虚构远程状态。
+7. 如实记录已创建的 Commit；
+8. 如实记录已推送的 Commit；
+9. 不虚构 SHA；
+10. 不虚构远程状态。
 
 ------
 
-## 17. Codex CLI 最终输出
+## 16. Codex CLI 最终输出
 
-任务结束后，必须在 CLI 最后明确打印：
+任务结束后，必须在 CLI 最后打印：
 
 ```text
 ========================================
-阶段 3G-R3 验收修复执行完成
+阶段 3G-R3 可复现性修复执行结果
 ========================================
 
 本轮结果文档：
-STAGE_3G_R3_ACCEPTANCE_REPAIR_REPORT.md
+STAGE_3G_R3_REPRODUCIBILITY_REPAIR_REPORT.md
+
+遗留修改检查：
+<真实结论>
 
 代码 Commit SHA：
-<真实代码 Commit SHA>
+<真实 SHA>
 
 结果文档 Commit SHA：
-<真实报告 Commit SHA>
+<真实 SHA>
 
 代码 push 结果：
 <真实结果>
@@ -843,76 +600,51 @@ STAGE_3G_R3_ACCEPTANCE_REPAIR_REPORT.md
 报告 push 结果：
 <真实结果>
 
-完整测试结果：
-<真实 passed 数量和警告>
+提交后完整测试：
+<真实 passed 数量和耗时>
 
 编译检查：
 <真实结果>
+
+测试代码与远程代码是否一致：
+<是或否，并说明依据>
 
 最终 git status --short：
 <真实输出；干净时明确写 clean>
 
 下一建议任务：
-<根据修正后的证据填写>
+阶段 3G-R3——Critic 更新尺度与终止因果关系补充诊断
 
 ========================================
 ```
 
-不得只输出：
+必须显示结果文档完整名称：
 
 ```text
-报告已生成
-任务已完成
-已推送
-```
-
-必须明确显示本轮结果文档的完整文件名：
-
-```text
-STAGE_3G_R3_ACCEPTANCE_REPAIR_REPORT.md
+STAGE_3G_R3_REPRODUCIBILITY_REPAIR_REPORT.md
 ```
 
 ------
 
-## 18. 禁止事项
+## 17. 禁止事项
 
 本轮禁止：
 
 ```text
-进入阶段 4
-直接开始 3G-R4 算法修改
-重新训练 20,000 步
-修改奖励公式
-修改奖励权重
-修改安全过滤器
-修改速度边界修复
-修改通信模型
-修改 TDMA 模型
-修改 Replay Buffer action 语义
+重新训练 MASAC
 修改 MASAC loss
-修改 MASAC 更新顺序
-删除旧测试
-删除新测试
-弱化测试断言
-把 evaluation applied action 称为 replay action
-宣称已排除 Critic 外推
-在没有梯度数字时宣称梯度异常
+修改 Actor 或 Critic
+修改奖励公式或权重
+修改安全过滤行为
+修改速度或加速度物理限制
+修改通信或 TDMA
+扩大容差
+删除回归测试
+直接丢弃两个本地修改
 提交 outputs/
-继续保留 aaa.md
-继续保留 CODEX_EXECUTION_REPORT.md
-结果文档使用固定名称
-CLI 不显示结果文档名称
+在源文件仍显示 M 时报告 completed
+宣称已确认遗留修改的原始作者
+进入阶段 3G-R4
+进入阶段 4
 伪造测试、Commit 或 push 结果
 ```
-
----
-
-## 长期结果文档规则
-
-每轮计划必须预先给出唯一的结果文档名，格式为：
-
-```text
-STAGE_<阶段编号>_<简短任务名>_REPORT.md
-```
-
-文件名使用大写英文字母和下划线。仓库根目录只保留当前轮报告，历史报告由 Git 历史保存；Codex CLI 最终输出必须打印该轮报告的完整文件名。不得自行决定报告文件名，也不得继续使用固定报告文件名。
