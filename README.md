@@ -163,7 +163,7 @@ The diagnostic directory contains checkpoint evolution, policy diagnostics,
 reward contributions, failure summaries, and a Markdown/JSON summary. These are
 run artifacts and are not committed. The current repository execution report is
 named for its stage and task; see
-[`STAGE_4A_MAPPO_IMPLEMENTATION_REPORT.md`](STAGE_4A_MAPPO_IMPLEMENTATION_REPORT.md).
+[`STAGE_4A_R1_MAPPO_SEMANTICS_REPAIR_REPORT.md`](STAGE_4A_R1_MAPPO_SEMANTICS_REPAIR_REPORT.md).
 
 ## Policy Comparison
 
