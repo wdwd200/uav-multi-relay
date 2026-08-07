@@ -153,7 +153,7 @@ The diagnostic directory contains checkpoint evolution, policy diagnostics,
 reward contributions, failure summaries, and a Markdown/JSON summary. These are
 run artifacts and are not committed. The current repository execution report is
 named for its stage and task; see
-[`STAGE_3G_R3_REPRODUCIBILITY_REPAIR_REPORT.md`](STAGE_3G_R3_REPRODUCIBILITY_REPAIR_REPORT.md).
+[`STAGE_3G_R4_FINAL_VALIDATION_REPORT.md`](STAGE_3G_R4_FINAL_VALIDATION_REPORT.md).
 
 ## Policy Comparison
 
